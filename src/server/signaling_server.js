@@ -5,6 +5,7 @@ import { WebSocketServer } from 'ws';
 
 import { config } from './config.js';
 import { MAKE_STORAGE } from './functions/encryption/makeStorage.js';
+import { localPeers } from './state/localPeers.js';
 
 const app = express();
 
@@ -33,7 +34,6 @@ const TOMBSTONES = new Map(); // roomId -> { roomId, expiredAt, lastSeenAt }
 const KEYPAIR = new Map(); // roomId -> { keypair }
 
 const ROOMS = Object.create(null);
-const PEERS = new WeakMap();
 
 const now = () => Date.now();
 const makeRoomId = () => `${Math.random().toString(36).slice(2, 12)}`;
@@ -144,7 +144,12 @@ function broadcast(room, obj) {
 function attachToRoom(params) {
   const { ws, meta, room, pairedDataChannel } = params;
   room.clients.set(meta.peerId, ws);
-  meta.roomId = room.id;
+
+  if (!localPeers.setRoomId(ws, room.id)) {
+    throw new Error(
+      `failed to assign room to peer ${meta.peerId}`,
+    );
+  }
 
   // 역할 부여
   const role = room.clients.size === 1 ? 'impolite' : 'polite';
@@ -228,12 +233,10 @@ function handleJoin(ws, meta, msg) {
 }
 
 function cbConnection(ws, req) {
-  // const ip = req?.socket?.remoteAddress;
-  // console.log('클라이언트 IP:', ip);
   const peerId = randomUUID();
 
   // "바로 배정"하지 않고, 클라의 'join' 메시지를 기다립니다.
-  PEERS.set(ws, { peerId, roomId: null });
+  localPeers.register(ws, peerId);
 
   ws.on('message', async (buf) => {
     let msg;
@@ -242,7 +245,7 @@ function cbConnection(ws, req) {
     } catch {
       return;
     }
-    const meta = PEERS.get(ws);
+    const meta = localPeers.getMeta(ws);
     if (!meta) return;
 
     if (msg?.type === 'join') {
@@ -294,7 +297,7 @@ function cbConnection(ws, req) {
   });
 
   ws.on('close', () => {
-    const meta = PEERS.get(ws);
+    const meta = localPeers.getMeta(ws);
     if (!meta) return;
     const { peerId, roomId } = meta;
     const room = ROOMS[roomId];
@@ -318,7 +321,7 @@ function cbConnection(ws, req) {
         delete ROOMS[roomId];
       }
     }
-    PEERS.delete(ws);
+    localPeers.remove(ws);
   });
 }
 

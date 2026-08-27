@@ -6,6 +6,7 @@
   "scripts": {
     "start": "node src/server/signaling_server.js",
     "test:config": "node scripts/config-test.mjs",
+    "test:local-peers": "node scripts/local-peers-test.mjs",
     "test:protocol": "node scripts/protocol-message-test.mjs"
   },
   "dependencies": {

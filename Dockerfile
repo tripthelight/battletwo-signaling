@@ -19,4 +19,4 @@ HEALTHCHECK --interval=10s --timeout=3s --start-period=5s --retries=3 \
 
 USER node
 
-CMD ["npm", "start"]
+CMD ["node", "src/server/signaling_server.js"]

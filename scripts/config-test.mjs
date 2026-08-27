@@ -48,6 +48,12 @@ test(
 
         redisConnectTimeoutMs:
           5_000,
+
+        peerPresenceTtlMs:
+          30_000,
+
+        peerPresenceRefreshMs:
+          10_000,
       },
     );
   },
@@ -78,6 +84,12 @@ test(
 
         REDIS_CONNECT_TIMEOUT_MS:
           '2500',
+
+        PEER_PRESENCE_TTL_MS:
+          '45000',
+
+        PEER_PRESENCE_REFRESH_MS:
+          '15000',
       });
 
     assert.equal(
@@ -113,6 +125,16 @@ test(
     assert.equal(
       config.redisConnectTimeoutMs,
       2_500,
+    );
+
+    assert.equal(
+      config.peerPresenceTtlMs,
+      45_000,
+    );
+
+    assert.equal(
+      config.peerPresenceRefreshMs,
+      15_000,
     );
   },
 );
@@ -282,6 +304,54 @@ test(
         });
       },
       /REDIS_CONNECT_TIMEOUT_MS/,
+    );
+  },
+);
+
+test(
+  'reject peer presence ttl below range',
+  () => {
+    assert.throws(
+      () => {
+        loadConfig({
+          PEER_PRESENCE_TTL_MS:
+            '1000',
+        });
+      },
+      /PEER_PRESENCE_TTL_MS/,
+    );
+  },
+);
+
+test(
+  'reject peer presence refresh below range',
+  () => {
+    assert.throws(
+      () => {
+        loadConfig({
+          PEER_PRESENCE_REFRESH_MS:
+            '500',
+        });
+      },
+      /PEER_PRESENCE_REFRESH_MS/,
+    );
+  },
+);
+
+test(
+  'reject refresh not below ttl',
+  () => {
+    assert.throws(
+      () => {
+        loadConfig({
+          PEER_PRESENCE_TTL_MS:
+            '30000',
+
+          PEER_PRESENCE_REFRESH_MS:
+            '30000',
+        });
+      },
+      /must be less than/,
     );
   },
 );

@@ -12,6 +12,9 @@ const DEFAULTS = Object.freeze({
   redisUrl: 'redis://127.0.0.1:6379',
   redisKeyPrefix: 'battletwo:signaling',
   redisConnectTimeoutMs: 5_000,
+
+  peerPresenceTtlMs: 30_000,
+  peerPresenceRefreshMs: 10_000,
 });
 
 function readString(
@@ -143,6 +146,37 @@ function readRedisKeyPrefix(
 export function loadConfig(
   env = process.env,
 ) {
+  const peerPresenceTtlMs =
+    readInteger(
+      env,
+      'PEER_PRESENCE_TTL_MS',
+      DEFAULTS.peerPresenceTtlMs,
+      {
+        min: 5_000,
+        max: 5 * 60_000,
+      },
+    );
+
+  const peerPresenceRefreshMs =
+    readInteger(
+      env,
+      'PEER_PRESENCE_REFRESH_MS',
+      DEFAULTS.peerPresenceRefreshMs,
+      {
+        min: 1_000,
+        max: 60_000,
+      },
+    );
+
+  if (
+    peerPresenceRefreshMs >=
+    peerPresenceTtlMs
+  ) {
+    throw new Error(
+      '[config] PEER_PRESENCE_REFRESH_MS must be less than PEER_PRESENCE_TTL_MS',
+    );
+  }
+
   return Object.freeze({
     rtcHost: readString(
       env,
@@ -197,6 +231,9 @@ export function loadConfig(
           max: 30_000,
         },
       ),
+
+    peerPresenceTtlMs,
+    peerPresenceRefreshMs,
   });
 }
 

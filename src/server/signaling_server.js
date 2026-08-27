@@ -1,31 +1,34 @@
-import dotenv from 'dotenv';
-dotenv.config();
 import express from 'express';
 import http from 'http';
-import { WebSocketServer } from 'ws';
-import path from 'path';
-import { fileURLToPath } from 'url';
 import { randomUUID } from 'crypto';
-import Redis from 'ioredis';
-import { v4 as uuidv4 } from 'uuid';
+import { WebSocketServer } from 'ws';
+
+import { config } from './config.js';
 import { MAKE_STORAGE } from './functions/encryption/makeStorage.js';
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-
 const app = express();
-const server = http.createServer(app);
-const wss = new WebSocketServer({ server });
 
-const PORT = process.env.RTC_PORT;
-const HOST = process.env.RTC_HOST;
-server.listen(PORT, HOST, () => {
-  console.log(`Server is running on http://${HOST}:${PORT}`, process.pid);
+const server = http.createServer(app);
+
+const wss = new WebSocketServer({
+  server,
+  maxPayload: config.maxPayloadBytes,
 });
+
+server.listen(
+  config.rtcPort,
+  config.rtcHost,
+  () => {
+    console.log(
+      `Server is running on http://${config.rtcHost}:${config.rtcPort}`,
+      process.pid,
+    );
+  },
+);
 
 // ———————————————————————————————————————————————————
 
-const ROOM_TTL_MS = 15_000; // 15초 안에 돌아오면 같은 room 재활용
+const ROOM_TTL_MS = config.roomTtlMs;
 const TOMBSTONES = new Map(); // roomId -> { roomId, expiredAt, lastSeenAt }
 const KEYPAIR = new Map(); // roomId -> { keypair }
 

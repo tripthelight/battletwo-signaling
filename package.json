@@ -14,7 +14,8 @@
     "test:peer-messenger": "node scripts/peer-messenger-test.mjs",
     "test:room-membership": "node scripts/room-membership-test.mjs",
     "test:matchmaker": "node scripts/matchmaker-test.mjs",
-    "test:matchmaker-redis": "node scripts/matchmaker-redis-test.mjs"
+    "test:matchmaker-redis": "node scripts/matchmaker-redis-test.mjs",
+    "test:resume-token": "node scripts/resume-token-test.mjs"
   },
   "dependencies": {
     "crc-32": "^1.2.2",

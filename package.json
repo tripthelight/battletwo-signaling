@@ -15,7 +15,9 @@
     "test:room-membership": "node scripts/room-membership-test.mjs",
     "test:matchmaker": "node scripts/matchmaker-test.mjs",
     "test:matchmaker-redis": "node scripts/matchmaker-redis-test.mjs",
-    "test:resume-token": "node scripts/resume-token-test.mjs"
+    "test:resume-token": "node scripts/resume-token-test.mjs",
+    "test:resume-session": "node scripts/resume-session-test.mjs",
+    "test:resume-session-redis": "node scripts/resume-session-redis-test.mjs"
   },
   "dependencies": {
     "crc-32": "^1.2.2",

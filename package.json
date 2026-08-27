@@ -4,7 +4,8 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "start": "node src/server/signaling_server.js"
+    "start": "node src/server/signaling_server.js",
+    "test:protocol": "node scripts/protocol-message-test.mjs"
   },
   "dependencies": {
     "crc-32": "^1.2.2",

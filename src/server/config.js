@@ -5,8 +5,13 @@ dotenv.config();
 const DEFAULTS = Object.freeze({
   rtcHost: '0.0.0.0',
   rtcPort: 5000,
+
   roomTtlMs: 15_000,
   maxPayloadBytes: 64 * 1024,
+
+  redisUrl: 'redis://127.0.0.1:6379',
+  redisKeyPrefix: 'battletwo:signaling',
+  redisConnectTimeoutMs: 5_000,
 });
 
 function readString(
@@ -17,11 +22,15 @@ function readString(
 ) {
   const raw = env[name];
 
-  if (raw === undefined || raw === null) {
+  if (
+    raw === undefined ||
+    raw === null
+  ) {
     return fallback;
   }
 
-  const value = String(raw).trim();
+  const value =
+    String(raw).trim();
 
   if (value.length === 0) {
     return fallback;
@@ -70,6 +79,67 @@ function readInteger(
   return value;
 }
 
+function readRedisUrl(
+  env,
+) {
+  const value = readString(
+    env,
+    'REDIS_URL',
+    DEFAULTS.redisUrl,
+    2_048,
+  );
+
+  let parsed;
+
+  try {
+    parsed = new URL(value);
+  } catch {
+    throw new Error(
+      '[config] REDIS_URL is invalid',
+    );
+  }
+
+  if (
+    parsed.protocol !== 'redis:' &&
+    parsed.protocol !== 'rediss:'
+  ) {
+    throw new Error(
+      '[config] REDIS_URL must use redis:// or rediss://',
+    );
+  }
+
+  if (!parsed.hostname) {
+    throw new Error(
+      '[config] REDIS_URL must include a host',
+    );
+  }
+
+  return value;
+}
+
+function readRedisKeyPrefix(
+  env,
+) {
+  const value = readString(
+    env,
+    'REDIS_KEY_PREFIX',
+    DEFAULTS.redisKeyPrefix,
+    128,
+  );
+
+  if (
+    !/^[a-zA-Z0-9:_-]+$/.test(
+      value,
+    )
+  ) {
+    throw new Error(
+      '[config] REDIS_KEY_PREFIX contains invalid characters',
+    );
+  }
+
+  return value;
+}
+
 export function loadConfig(
   env = process.env,
 ) {
@@ -100,16 +170,35 @@ export function loadConfig(
       },
     ),
 
-    maxPayloadBytes: readInteger(
-      env,
-      'WS_MAX_PAYLOAD_BYTES',
-      DEFAULTS.maxPayloadBytes,
-      {
-        min: 1_024,
-        max: 1024 * 1024,
-      },
-    ),
+    maxPayloadBytes:
+      readInteger(
+        env,
+        'WS_MAX_PAYLOAD_BYTES',
+        DEFAULTS.maxPayloadBytes,
+        {
+          min: 1_024,
+          max: 1024 * 1024,
+        },
+      ),
+
+    redisUrl:
+      readRedisUrl(env),
+
+    redisKeyPrefix:
+      readRedisKeyPrefix(env),
+
+    redisConnectTimeoutMs:
+      readInteger(
+        env,
+        'REDIS_CONNECT_TIMEOUT_MS',
+        DEFAULTS.redisConnectTimeoutMs,
+        {
+          min: 500,
+          max: 30_000,
+        },
+      ),
   });
 }
 
-export const config = loadConfig();
+export const config =
+  loadConfig();

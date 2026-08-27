@@ -15,6 +15,10 @@ const DEFAULTS = Object.freeze({
 
   peerPresenceTtlMs: 30_000,
   peerPresenceRefreshMs: 10_000,
+
+  resumeSessionTtlMs: 15_000,
+  resumeClaimTtlMs: 5_000,
+  resumeClaimRefreshMs: 2_000,
 });
 
 function readString(
@@ -177,6 +181,57 @@ export function loadConfig(
     );
   }
 
+  const resumeSessionTtlMs =
+    readInteger(
+      env,
+      'RESUME_SESSION_TTL_MS',
+      DEFAULTS.resumeSessionTtlMs,
+      {
+        min: 5_000,
+        max: 5 * 60_000,
+      },
+    );
+
+  const resumeClaimTtlMs =
+    readInteger(
+      env,
+      'RESUME_CLAIM_TTL_MS',
+      DEFAULTS.resumeClaimTtlMs,
+      {
+        min: 1_000,
+        max: 60_000,
+      },
+    );
+
+  const resumeClaimRefreshMs =
+    readInteger(
+      env,
+      'RESUME_CLAIM_REFRESH_MS',
+      DEFAULTS.resumeClaimRefreshMs,
+      {
+        min: 500,
+        max: 60_000,
+      },
+    );
+
+  if (
+    resumeClaimTtlMs >=
+    resumeSessionTtlMs
+  ) {
+    throw new Error(
+      '[config] RESUME_CLAIM_TTL_MS must be less than RESUME_SESSION_TTL_MS',
+    );
+  }
+
+  if (
+    resumeClaimRefreshMs >=
+    resumeClaimTtlMs
+  ) {
+    throw new Error(
+      '[config] RESUME_CLAIM_REFRESH_MS must be less than RESUME_CLAIM_TTL_MS',
+    );
+  }
+
   return Object.freeze({
     rtcHost: readString(
       env,
@@ -234,6 +289,10 @@ export function loadConfig(
 
     peerPresenceTtlMs,
     peerPresenceRefreshMs,
+
+    resumeSessionTtlMs,
+    resumeClaimTtlMs,
+    resumeClaimRefreshMs,
   });
 }
 

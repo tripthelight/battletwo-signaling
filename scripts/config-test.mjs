@@ -54,6 +54,15 @@ test(
 
         peerPresenceRefreshMs:
           10_000,
+
+        resumeSessionTtlMs:
+          15_000,
+
+        resumeClaimTtlMs:
+          5_000,
+
+        resumeClaimRefreshMs:
+          2_000,
       },
     );
   },
@@ -90,6 +99,15 @@ test(
 
         PEER_PRESENCE_REFRESH_MS:
           '15000',
+
+        RESUME_SESSION_TTL_MS:
+          '30000',
+
+        RESUME_CLAIM_TTL_MS:
+          '8000',
+
+        RESUME_CLAIM_REFRESH_MS:
+          '3000',
       });
 
     assert.equal(
@@ -135,6 +153,21 @@ test(
     assert.equal(
       config.peerPresenceRefreshMs,
       15_000,
+    );
+
+    assert.equal(
+      config.resumeSessionTtlMs,
+      30_000,
+    );
+
+    assert.equal(
+      config.resumeClaimTtlMs,
+      8_000,
+    );
+
+    assert.equal(
+      config.resumeClaimRefreshMs,
+      3_000,
     );
   },
 );
@@ -339,7 +372,7 @@ test(
 );
 
 test(
-  'reject refresh not below ttl',
+  'reject peer presence refresh not below ttl',
   () => {
     assert.throws(
       () => {
@@ -351,7 +384,88 @@ test(
             '30000',
         });
       },
-      /must be less than/,
+      /PEER_PRESENCE_REFRESH_MS must be less than PEER_PRESENCE_TTL_MS/,
+    );
+  },
+);
+
+test(
+  'reject resume session ttl below range',
+  () => {
+    assert.throws(
+      () => {
+        loadConfig({
+          RESUME_SESSION_TTL_MS:
+            '4000',
+        });
+      },
+      /RESUME_SESSION_TTL_MS/,
+    );
+  },
+);
+
+test(
+  'reject resume claim ttl below range',
+  () => {
+    assert.throws(
+      () => {
+        loadConfig({
+          RESUME_CLAIM_TTL_MS:
+            '500',
+        });
+      },
+      /RESUME_CLAIM_TTL_MS/,
+    );
+  },
+);
+
+test(
+  'reject resume claim refresh below range',
+  () => {
+    assert.throws(
+      () => {
+        loadConfig({
+          RESUME_CLAIM_REFRESH_MS:
+            '100',
+        });
+      },
+      /RESUME_CLAIM_REFRESH_MS/,
+    );
+  },
+);
+
+test(
+  'reject resume claim ttl not below session ttl',
+  () => {
+    assert.throws(
+      () => {
+        loadConfig({
+          RESUME_SESSION_TTL_MS:
+            '10000',
+
+          RESUME_CLAIM_TTL_MS:
+            '10000',
+        });
+      },
+      /RESUME_CLAIM_TTL_MS must be less than RESUME_SESSION_TTL_MS/,
+    );
+  },
+);
+
+test(
+  'reject resume claim refresh not below claim ttl',
+  () => {
+    assert.throws(
+      () => {
+        loadConfig({
+          RESUME_CLAIM_TTL_MS:
+            '5000',
+
+          RESUME_CLAIM_REFRESH_MS:
+            '5000',
+        });
+      },
+      /RESUME_CLAIM_REFRESH_MS must be less than RESUME_CLAIM_TTL_MS/,
     );
   },
 );

@@ -6,6 +6,12 @@ import { WebSocketServer } from 'ws';
 import { config } from './config.js';
 import { MAKE_STORAGE } from './functions/encryption/makeStorage.js';
 import { createPeerDirectory } from './peerDirectory.js';
+import {
+  createResumeClaimManager,
+} from './resumeClaimManager.js';
+import {
+  createResumeSessionStore,
+} from './resumeSession.js';
 import { redis } from './redis.js';
 import { localPeers } from './state/localPeers.js';
 
@@ -27,6 +33,30 @@ const peerDirectory =
       redis.instanceId,
     ttlMs:
       config.peerPresenceTtlMs,
+  });
+
+const resumeSessionStore =
+  createResumeSessionStore({
+    command:
+      redis.command,
+
+    keyPrefix:
+      config.redisKeyPrefix,
+
+    ttlMs:
+      config.resumeSessionTtlMs,
+
+    claimTtlMs:
+      config.resumeClaimTtlMs,
+  });
+
+const resumeClaimManager =
+  createResumeClaimManager({
+    store:
+      resumeSessionStore,
+
+    refreshMs:
+      config.resumeClaimRefreshMs,
   });
 
 const activePeerIds =
@@ -597,6 +627,8 @@ async function startServer() {
   );
 
   startPresenceRefresh();
+
+  resumeClaimManager.start();
 }
 
 async function unregisterAllPeers() {
@@ -711,6 +743,8 @@ async function shutdown(
 
   stopPresenceRefresh();
 
+  resumeClaimManager.stop();
+
   try {
     await unregisterAllPeers();
 
@@ -723,6 +757,8 @@ async function shutdown(
       error,
     );
   } finally {
+    await resumeClaimManager.releaseAll();
+
     redis.disconnect();
   }
 }
@@ -753,6 +789,9 @@ void startServer().catch(
     );
 
     stopPresenceRefresh();
+
+    resumeClaimManager.stop();
+
     redis.disconnect();
 
     process.exitCode = 1;

@@ -5,6 +5,8 @@ import { WebSocketServer } from 'ws';
 
 import { config } from './config.js';
 import { MAKE_STORAGE } from './functions/encryption/makeStorage.js';
+import { createPeerDirectory } from './peerDirectory.js';
+import { redis } from './redis.js';
 import { localPeers } from './state/localPeers.js';
 
 const app = express();
@@ -16,16 +18,157 @@ const wss = new WebSocketServer({
   maxPayload: config.maxPayloadBytes,
 });
 
-server.listen(
-  config.rtcPort,
-  config.rtcHost,
-  () => {
-    console.log(
-      `Server is running on http://${config.rtcHost}:${config.rtcPort}`,
-      process.pid,
+const peerDirectory =
+  createPeerDirectory({
+    command: redis.command,
+    keyPrefix:
+      config.redisKeyPrefix,
+    instanceId:
+      redis.instanceId,
+    ttlMs:
+      config.peerPresenceTtlMs,
+  });
+
+const activePeerIds =
+  new Set();
+
+let presenceRefreshRunning =
+  false;
+
+let presenceRefreshTimer =
+  null;
+
+let shuttingDown =
+  false;
+
+async function refreshOnePeer(
+  peerId,
+) {
+  if (
+    shuttingDown ||
+    !activePeerIds.has(peerId)
+  ) {
+    return;
+  }
+
+  try {
+    const refreshed =
+      await peerDirectory.refresh(
+        peerId,
+      );
+
+    if (
+      shuttingDown ||
+      !activePeerIds.has(peerId)
+    ) {
+      return;
+    }
+
+    if (refreshed) {
+      return;
+    }
+
+    const owner =
+      await peerDirectory.findInstance(
+        peerId,
+      );
+
+    if (
+      shuttingDown ||
+      !activePeerIds.has(peerId)
+    ) {
+      return;
+    }
+
+    if (owner === null) {
+      await peerDirectory.register(
+        peerId,
+      );
+
+      if (
+        shuttingDown ||
+        !activePeerIds.has(peerId)
+      ) {
+        return;
+      }
+
+      console.warn(
+        `[presence] restored peer ${peerId}`,
+      );
+
+      return;
+    }
+
+    if (
+      owner !== redis.instanceId
+    ) {
+      console.error(
+        `[presence] peer ${peerId} is owned by ${owner}`,
+      );
+    }
+  } catch (error) {
+    console.error(
+      `[presence] failed to refresh peer ${peerId}:`,
+      error,
     );
-  },
-);
+  }
+}
+
+async function refreshPeerPresence() {
+  if (
+    shuttingDown ||
+    presenceRefreshRunning
+  ) {
+    return;
+  }
+
+  presenceRefreshRunning =
+    true;
+
+  try {
+    const peerIds =
+      Array.from(
+        activePeerIds,
+      );
+
+    await Promise.all(
+      peerIds.map(
+        refreshOnePeer,
+      ),
+    );
+  } finally {
+    presenceRefreshRunning =
+      false;
+  }
+}
+
+function startPresenceRefresh() {
+  presenceRefreshTimer =
+    setInterval(
+      () => {
+        void refreshPeerPresence();
+      },
+      config.peerPresenceRefreshMs,
+    );
+
+  presenceRefreshTimer.unref();
+}
+
+function stopPresenceRefresh() {
+  if (
+    presenceRefreshTimer ===
+    null
+  ) {
+    return;
+  }
+
+  clearInterval(
+    presenceRefreshTimer,
+  );
+
+  presenceRefreshTimer =
+    null;
+}
 
 // ———————————————————————————————————————————————————
 
@@ -235,8 +378,41 @@ function handleJoin(ws, meta, msg) {
 function cbConnection(ws, req) {
   const peerId = randomUUID();
 
-  // "바로 배정"하지 않고, 클라의 'join' 메시지를 기다립니다.
-  localPeers.register(ws, peerId);
+  // "바로 배정"하지 않고,
+  // 클라의 'join' 메시지를 기다립니다.
+  localPeers.register(
+    ws,
+    peerId,
+  );
+
+  const presenceReady =
+    peerDirectory
+      .register(peerId)
+      .then(() => {
+        activePeerIds.add(
+          peerId,
+        );
+
+        return true;
+      })
+      .catch((error) => {
+        console.error(
+          `[presence] failed to register peer ${peerId}:`,
+          error,
+        );
+
+        if (
+          ws.readyState ===
+          ws.OPEN
+        ) {
+          ws.close(
+            1011,
+            'presence unavailable',
+          );
+        }
+
+        return false;
+      });
 
   ws.on('message', async (buf) => {
     let msg;
@@ -245,6 +421,14 @@ function cbConnection(ws, req) {
     } catch {
       return;
     }
+
+    const presenceRegistered =
+      await presenceReady;
+
+    if (!presenceRegistered) {
+      return;
+    }
+
     const meta = localPeers.getMeta(ws);
     if (!meta) return;
 
@@ -321,8 +505,256 @@ function cbConnection(ws, req) {
         delete ROOMS[roomId];
       }
     }
+
     localPeers.remove(ws);
+
+    void presenceReady.then(
+      async (
+        presenceRegistered,
+      ) => {
+        activePeerIds.delete(
+          peerId,
+        );
+
+        if (
+          !presenceRegistered
+        ) {
+          return;
+        }
+
+        try {
+          await peerDirectory.unregister(
+            peerId,
+          );
+        } catch (error) {
+          console.error(
+            `[presence] failed to unregister peer ${peerId}:`,
+            error,
+          );
+        }
+      },
+    );
   });
 }
 
 wss.on('connection', cbConnection);
+
+function listenHttpServer() {
+  return new Promise(
+    (resolve, reject) => {
+      function onError(error) {
+        server.off(
+          'listening',
+          onListening,
+        );
+
+        reject(error);
+      }
+
+      function onListening() {
+        server.off(
+          'error',
+          onError,
+        );
+
+        resolve();
+      }
+
+      server.once(
+        'error',
+        onError,
+      );
+
+      server.once(
+        'listening',
+        onListening,
+      );
+
+      server.listen(
+        config.rtcPort,
+        config.rtcHost,
+      );
+    },
+  );
+}
+
+async function startServer() {
+  await redis.connect();
+
+  console.log(
+    `[redis] connected as ${redis.instanceId}`,
+  );
+
+  console.log(
+    `[redis] instance channel ${redis.instanceChannel}`,
+  );
+
+  await listenHttpServer();
+
+  console.log(
+    `Server is running on http://${config.rtcHost}:${config.rtcPort}`,
+    process.pid,
+  );
+
+  startPresenceRefresh();
+}
+
+async function unregisterAllPeers() {
+  const peerIds =
+    Array.from(
+      activePeerIds,
+    );
+
+  await Promise.allSettled(
+    peerIds.map(
+      (peerId) =>
+        peerDirectory.unregister(
+          peerId,
+        ),
+    ),
+  );
+
+  activePeerIds.clear();
+}
+
+async function closeWebSocketServer() {
+  const closed =
+    new Promise(
+      (resolve) => {
+        wss.close(
+          () => {
+            resolve();
+          },
+        );
+      },
+    );
+
+  for (
+    const ws
+    of wss.clients
+  ) {
+    ws.close(
+      1012,
+      'server restart',
+    );
+  }
+
+  let forceCloseTimer;
+
+  const forceClose =
+    new Promise(
+      (resolve) => {
+        forceCloseTimer =
+          setTimeout(
+            () => {
+              for (
+                const ws
+                of wss.clients
+              ) {
+                ws.terminate();
+              }
+
+              resolve();
+            },
+            5_000,
+          );
+      },
+    );
+
+  await Promise.race([
+    closed,
+    forceClose,
+  ]);
+
+  clearTimeout(
+    forceCloseTimer,
+  );
+
+  for (
+    const ws
+    of wss.clients
+  ) {
+    ws.terminate();
+  }
+
+  await closed;
+}
+
+async function closeHttpServer() {
+  if (!server.listening) {
+    return;
+  }
+
+  await new Promise(
+    (resolve) => {
+      server.close(
+        () => {
+          resolve();
+        },
+      );
+    },
+  );
+}
+
+async function shutdown(
+  signal,
+) {
+  if (shuttingDown) {
+    return;
+  }
+
+  shuttingDown = true;
+
+  console.log(
+    `[shutdown] ${signal}`,
+  );
+
+  stopPresenceRefresh();
+
+  try {
+    await unregisterAllPeers();
+
+    await closeWebSocketServer();
+
+    await closeHttpServer();
+  } catch (error) {
+    console.error(
+      '[shutdown] error:',
+      error,
+    );
+  } finally {
+    redis.disconnect();
+  }
+}
+
+process.on(
+  'SIGTERM',
+  () => {
+    void shutdown(
+      'SIGTERM',
+    );
+  },
+);
+
+process.on(
+  'SIGINT',
+  () => {
+    void shutdown(
+      'SIGINT',
+    );
+  },
+);
+
+void startServer().catch(
+  (error) => {
+    console.error(
+      '[startup] failed:',
+      error,
+    );
+
+    stopPresenceRefresh();
+    redis.disconnect();
+
+    process.exitCode = 1;
+  },
+);

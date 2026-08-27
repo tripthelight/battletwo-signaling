@@ -9,7 +9,8 @@
     "test:local-peers": "node scripts/local-peers-test.mjs",
     "test:protocol": "node scripts/protocol-message-test.mjs",
     "test:redis": "node scripts/redis-context-test.mjs",
-    "test:relay": "node scripts/instance-relay-test.mjs"
+    "test:relay": "node scripts/instance-relay-test.mjs",
+    "test:peer-directory": "node scripts/peer-directory-test.mjs"
   },
   "dependencies": {
     "crc-32": "^1.2.2",

@@ -42,6 +42,19 @@ function assertRoomId(
   }
 }
 
+function assertRole(
+  role,
+) {
+  if (
+    role !== 'impolite' &&
+    role !== 'polite'
+  ) {
+    throw new TypeError(
+      'role must be impolite or polite',
+    );
+  }
+}
+
 function assertDueAtMs(
   dueAtMs,
 ) {
@@ -67,6 +80,47 @@ function assertCleanupLimit(
       'limit must be an integer between 1 and 1000',
     );
   }
+}
+
+function parseRestoreResult(
+  result,
+  roomId,
+  role,
+) {
+  if (
+    !Array.isArray(result) ||
+    result.length === 0
+  ) {
+    throw new Error(
+      'invalid room restore result',
+    );
+  }
+
+  const status =
+    result[0];
+
+  if (status === 'invalid') {
+    return null;
+  }
+
+  if (status !== 'restored') {
+    throw new Error(
+      `unknown room restore status: ${status}`,
+    );
+  }
+
+  const partnerPeerId =
+    result[1];
+
+  assertPeerId(
+    partnerPeerId,
+  );
+
+  return Object.freeze({
+    roomId,
+    role,
+    partnerPeerId,
+  });
 }
 
 function parseCleanupDueResult(
@@ -326,6 +380,176 @@ export function createRoomMembership({
       );
 
     return result;
+  }
+
+  async function restore({
+    peerId,
+    roomId,
+    role,
+  }) {
+    assertPeerId(
+      peerId,
+    );
+
+    assertRoomId(
+      roomId,
+    );
+
+    assertRole(
+      role,
+    );
+
+    const peerRoomKey =
+      makePeerRoomKey(
+        keyPrefix,
+        peerId,
+      );
+
+    const roomKey =
+      makeRoomKey(
+        keyPrefix,
+        roomId,
+      );
+
+    const result =
+      await command.eval(
+        `
+          -- room-membership:restore
+
+          local currentRoomId =
+            redis.call(
+              'GET',
+              KEYS[1]
+            )
+
+          if
+            not currentRoomId or
+            currentRoomId ~= ARGV[1]
+          then
+            return {
+              'invalid'
+            }
+          end
+
+          local members =
+            redis.call(
+              'HMGET',
+              KEYS[2],
+              'impolite',
+              'polite'
+            )
+
+          local impolite =
+            members[1]
+
+          local polite =
+            members[2]
+
+          if
+            not impolite or
+            not polite
+          then
+            return {
+              'invalid'
+            }
+          end
+
+          local partnerPeerId
+
+          if
+            ARGV[3] == 'impolite'
+          then
+            if
+              impolite ~= ARGV[2]
+            then
+              return {
+                'invalid'
+              }
+            end
+
+            partnerPeerId =
+              polite
+          elseif
+            ARGV[3] == 'polite'
+          then
+            if
+              polite ~= ARGV[2]
+            then
+              return {
+                'invalid'
+              }
+            end
+
+            partnerPeerId =
+              impolite
+          else
+            return {
+              'invalid'
+            }
+          end
+
+          if
+            not partnerPeerId or
+            partnerPeerId == ARGV[2]
+          then
+            return {
+              'invalid'
+            }
+          end
+
+          local partnerRoomKey =
+            ARGV[4] ..
+            ':peer-room:' ..
+            partnerPeerId
+
+          local partnerRoomId =
+            redis.call(
+              'GET',
+              partnerRoomKey
+            )
+
+          if
+            not partnerRoomId or
+            partnerRoomId ~= ARGV[1]
+          then
+            return {
+              'invalid'
+            }
+          end
+
+          redis.call(
+            'ZREM',
+            KEYS[3],
+            ARGV[2]
+          )
+
+          redis.call(
+            'HDEL',
+            KEYS[4],
+            ARGV[2]
+          )
+
+          return {
+            'restored',
+            partnerPeerId
+          }
+        `,
+        4,
+        peerRoomKey,
+        roomKey,
+        cleanupKey,
+        cleanupRoomKey,
+        roomId,
+        peerId,
+        role,
+        keyPrefix,
+      );
+
+    return parseRestoreResult(
+      result,
+      roomId,
+      role,
+    );
   }
 
   async function scheduleDisconnect({
@@ -661,6 +885,7 @@ export function createRoomMembership({
   return Object.freeze({
     findRoom,
     arePartners,
+    restore,
     scheduleDisconnect,
     cancelDisconnect,
     cleanupDue,

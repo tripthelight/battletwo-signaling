@@ -90,22 +90,6 @@ function isValidActiveRecord(
   );
 }
 
-async function releaseAfterRestoreError({
-  connectionManager,
-  connection,
-}) {
-  try {
-    await connectionManager.release(
-      connection,
-    );
-  } catch (error) {
-    console.error(
-      '[resume] failed to release claim after restore error:',
-      error,
-    );
-  }
-}
-
 async function removeInvalidSession({
   connectionManager,
   connection,
@@ -172,6 +156,16 @@ export function createResumeJoinManager({
       result.status !==
       'acquired'
     ) {
+      /*
+       * missing:
+       *   session이 이미 만료되었거나 존재하지 않음.
+       *
+       * claimed:
+       *   다른 connection이 현재 claim을 보유 중.
+       *
+       * invalid:
+       *   Redis session record 자체가 손상됨.
+       */
       return Object.freeze({
         ...result,
       });
@@ -198,10 +192,15 @@ export function createResumeJoinManager({
      *
      * 서버가 동일 peerId의 local/presence identity를
      * 정상적으로 활성화한 다음 restore()를 호출해야 한다.
+     *
+     * 이미 다른 connection이 token을 점유한 상태는
+     * status: 'claimed'이고,
+     * 이 connection이 정상적으로 claim을 획득한 상태는
+     * status: 'acquired'로 구분한다.
      */
     return Object.freeze({
       status:
-        'claimed',
+        'acquired',
 
       token:
         result.token,
@@ -256,14 +255,22 @@ export function createResumeJoinManager({
         });
     } catch (error) {
       /*
-       * Redis 등 일시 장애라면 session 자체는 지우지 않는다.
-       * claim만 풀어 두어 grace 시간 내 재시도가 가능하게 한다.
+       * 중요:
+       *
+       * 여기서 claim을 release하면 안 된다.
+       *
+       * 서버는 이미 같은 peerId를 localPeers와
+       * peerDirectory에 활성화했을 수 있다.
+       *
+       * 이 상태에서 claim을 먼저 풀면 다른 connection이
+       * 같은 resumeToken을 획득하여 동일 peerId가
+       * 동시에 활성화될 수 있다.
+       *
+       * 따라서 오류를 그대로 caller에게 전달하고,
+       * caller가 local/presence cleanup을 모두 끝낸 뒤
+       * connection lifecycle의 마지막 단계에서
+       * release()를 호출해야 한다.
        */
-      await releaseAfterRestoreError({
-        connectionManager,
-        connection,
-      });
-
       throw error;
     }
 
@@ -271,6 +278,9 @@ export function createResumeJoinManager({
       /*
        * token은 존재하지만 실제 room 상태와 맞지 않는다.
        * 다시 사용할 수 없는 stale session이므로 삭제한다.
+       *
+       * remove()는 session과 claim을 함께 제거하므로
+       * 같은 token을 사용한 재접속은 더 이상 불가능하다.
        */
       await removeInvalidSession({
         connectionManager,

@@ -352,6 +352,11 @@ await test(
     );
 
     assert.equal(
+      fakeConnection.calls.claim,
+      1,
+    );
+
+    assert.equal(
       fakeRoom.calls.length,
       0,
     );
@@ -359,7 +364,7 @@ await test(
 );
 
 await test(
-  'claim does not restore room yet',
+  'acquire claim without restoring room yet',
   async () => {
     const connection =
       {};
@@ -388,7 +393,7 @@ await test(
       }),
       {
         status:
-          'claimed',
+          'acquired',
 
         token:
           VALID_TOKEN,
@@ -404,11 +409,6 @@ await test(
       },
     );
 
-    /*
-     * 이 시점에는 server가 아직 동일 peerId를
-     * local/presence에 등록할 기회를 가져야 하므로
-     * room restore가 호출되면 안 된다.
-     */
     assert.equal(
       fakeRoom.calls.length,
       0,
@@ -424,7 +424,84 @@ await test(
 );
 
 await test(
-  'restore claimed room membership',
+  'distinguish acquired claim from occupied claim',
+  async () => {
+    const acquiredConnection =
+      {};
+
+    const occupiedConnection =
+      {};
+
+    const acquiredFake =
+      createFakeConnectionManager();
+
+    const occupiedFake =
+      createFakeConnectionManager({
+        claimStatus:
+          'claimed',
+      });
+
+    const acquiredRoom =
+      createFakeRoomMembership();
+
+    const occupiedRoom =
+      createFakeRoomMembership();
+
+    const acquiredManager =
+      createResumeJoinManager({
+        connectionManager:
+          acquiredFake.manager,
+
+        roomMembership:
+          acquiredRoom.membership,
+      });
+
+    const occupiedManager =
+      createResumeJoinManager({
+        connectionManager:
+          occupiedFake.manager,
+
+        roomMembership:
+          occupiedRoom.membership,
+      });
+
+    const acquired =
+      await acquiredManager.claim({
+        connection:
+          acquiredConnection,
+
+        token:
+          VALID_TOKEN,
+      });
+
+    const occupied =
+      await occupiedManager.claim({
+        connection:
+          occupiedConnection,
+
+        token:
+          VALID_TOKEN,
+      });
+
+    assert.equal(
+      acquired.status,
+      'acquired',
+    );
+
+    assert.equal(
+      occupied.status,
+      'claimed',
+    );
+
+    assert.notEqual(
+      acquired.status,
+      occupied.status,
+    );
+  },
+);
+
+await test(
+  'restore acquired room membership',
   async () => {
     const connection =
       {};
@@ -444,12 +521,18 @@ await test(
           fakeRoom.membership,
       });
 
-    await manager.claim({
-      connection,
+    const claimed =
+      await manager.claim({
+        connection,
 
-      token:
-        VALID_TOKEN,
-    });
+        token:
+          VALID_TOKEN,
+      });
+
+    assert.equal(
+      claimed.status,
+      'acquired',
+    );
 
     assert.deepEqual(
       await manager.restore(
@@ -535,12 +618,18 @@ await test(
           fakeRoom.membership,
       });
 
-    await manager.claim({
-      connection,
+    const claimed =
+      await manager.claim({
+        connection,
 
-      token:
-        VALID_TOKEN,
-    });
+        token:
+          VALID_TOKEN,
+      });
+
+    assert.equal(
+      claimed.status,
+      'acquired',
+    );
 
     assert.deepEqual(
       await manager.restore(
@@ -598,12 +687,18 @@ await test(
           fakeRoom.membership,
       });
 
-    await manager.claim({
-      connection,
+    const claimed =
+      await manager.claim({
+        connection,
 
-      token:
-        VALID_TOKEN,
-    });
+        token:
+          VALID_TOKEN,
+      });
+
+    assert.equal(
+      claimed.status,
+      'acquired',
+    );
 
     assert.deepEqual(
       await manager.restore(
@@ -630,7 +725,7 @@ await test(
 );
 
 await test(
-  'release claim when restore throws',
+  'preserve claim when restore throws',
   async () => {
     const connection =
       {};
@@ -658,12 +753,18 @@ await test(
           fakeRoom.membership,
       });
 
-    await manager.claim({
-      connection,
+    const claimed =
+      await manager.claim({
+        connection,
 
-      token:
-        VALID_TOKEN,
-    });
+        token:
+          VALID_TOKEN,
+      });
+
+    assert.equal(
+      claimed.status,
+      'acquired',
+    );
 
     await assert.rejects(
       manager.restore(
@@ -676,14 +777,39 @@ await test(
         restoreError,
     );
 
+    /*
+     * restore 오류만으로는 claim을 풀면 안 된다.
+     *
+     * caller가 동일 peerId의 local/presence cleanup을
+     * 완료한 다음 release()해야 한다.
+     */
     assert.equal(
       fakeConnection.calls.release,
-      1,
+      0,
     );
 
     assert.equal(
       fakeConnection.calls.remove,
       0,
+    );
+
+    assert.equal(
+      fakeConnection.active.has(
+        connection,
+      ),
+      true,
+    );
+
+    assert.equal(
+      await manager.release(
+        connection,
+      ),
+      true,
+    );
+
+    assert.equal(
+      fakeConnection.calls.release,
+      1,
     );
 
     assert.equal(

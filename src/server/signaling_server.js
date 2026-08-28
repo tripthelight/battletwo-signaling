@@ -8,6 +8,9 @@ import { MAKE_STORAGE } from './functions/encryption/makeStorage.js';
 import {
   createInstanceRelay,
 } from './instanceRelay.js';
+import {
+  createMatchmaker,
+} from './matchmaker.js';
 import { createPeerDirectory } from './peerDirectory.js';
 import {
   createPeerMessenger,
@@ -70,6 +73,15 @@ const peerMessenger =
 
     deliver:
       safeSend,
+  });
+
+const matchmaker =
+  createMatchmaker({
+    command:
+      redis.command,
+
+    keyPrefix:
+      config.redisKeyPrefix,
   });
 
 const resumeSessionStore =
@@ -442,6 +454,21 @@ function handleJoin(ws, meta, msg) {
   attachToRoom(params);
 }
 
+async function cancelPeerWaiting(
+  peerId,
+) {
+  try {
+    await matchmaker.cancelWaiting(
+      peerId,
+    );
+  } catch (error) {
+    console.error(
+      `[matchmaking] failed to cancel waiting peer ${peerId}:`,
+      error,
+    );
+  }
+}
+
 async function registerPeerIdentity(
   ws,
   peerId,
@@ -793,6 +820,10 @@ function cbConnection(ws, req) {
         peerId,
       );
 
+      void cancelPeerWaiting(
+        peerId,
+      );
+
       void peerDirectory
         .unregister(
           peerId,
@@ -873,6 +904,22 @@ async function startServer() {
   startPresenceRefresh();
 
   resumeClaimManager.start();
+}
+
+async function cancelAllWaitingPeers() {
+  const peerIds =
+    Array.from(
+      activePeerIds,
+    );
+
+  await Promise.allSettled(
+    peerIds.map(
+      (peerId) =>
+        matchmaker.cancelWaiting(
+          peerId,
+        ),
+    ),
+  );
 }
 
 async function unregisterAllPeers() {
@@ -990,6 +1037,8 @@ async function shutdown(
   resumeClaimManager.stop();
 
   try {
+    await cancelAllWaitingPeers();
+
     await unregisterAllPeers();
 
     await closeWebSocketServer();

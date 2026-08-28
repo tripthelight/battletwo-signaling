@@ -405,166 +405,371 @@ function handleJoin(ws, meta, msg) {
   attachToRoom(params);
 }
 
-function cbConnection(ws, req) {
-  const peerId = randomUUID();
+async function registerPeerIdentity(
+  ws,
+  peerId,
+) {
+  if (shuttingDown) {
+    return null;
+  }
 
-  // "바로 배정"하지 않고,
-  // 클라의 'join' 메시지를 기다립니다.
-  localPeers.register(
-    ws,
-    peerId,
-  );
+  try {
+    await peerDirectory.register(
+      peerId,
+    );
 
-  const presenceReady =
-    peerDirectory
-      .register(peerId)
-      .then(() => {
-        activePeerIds.add(
+    if (
+      shuttingDown ||
+      ws.readyState !== ws.OPEN
+    ) {
+      try {
+        await peerDirectory.unregister(
           peerId,
         );
-
-        return true;
-      })
-      .catch((error) => {
+      } catch (error) {
         console.error(
-          `[presence] failed to register peer ${peerId}:`,
+          `[presence] failed to clean up peer ${peerId}:`,
           error,
         );
+      }
 
-        if (
-          ws.readyState ===
-          ws.OPEN
-        ) {
-          ws.close(
-            1011,
-            'presence unavailable',
-          );
-        }
+      return null;
+    }
 
-        return false;
-      });
+    const meta =
+      localPeers.register(
+        ws,
+        peerId,
+      );
 
-  ws.on('message', async (buf) => {
-    let msg;
+    activePeerIds.add(
+      peerId,
+    );
+
+    return meta;
+  } catch (error) {
+    activePeerIds.delete(
+      peerId,
+    );
+
+    localPeers.remove(
+      ws,
+    );
+
     try {
-      msg = JSON.parse(buf.toString());
-    } catch {
-      return;
+      await peerDirectory.unregister(
+        peerId,
+      );
+    } catch (cleanupError) {
+      console.error(
+        `[presence] failed to clean up peer ${peerId}:`,
+        cleanupError,
+      );
     }
 
-    const presenceRegistered =
-      await presenceReady;
+    console.error(
+      `[presence] failed to register peer ${peerId}:`,
+      error,
+    );
 
-    if (!presenceRegistered) {
-      return;
+    if (
+      ws.readyState ===
+      ws.OPEN
+    ) {
+      ws.close(
+        1011,
+        'presence unavailable',
+      );
     }
 
-    const meta = localPeers.getMeta(ws);
-    if (!meta) return;
+    return null;
+  }
+}
 
-    if (msg?.type === 'join') {
-      // ★ 클라가 요청한 room 합류
-      handleJoin(ws, meta, msg);
-      return;
+function cbConnection(ws, req) {
+  let joinStarted =
+    false;
+
+  let peerActivation =
+    null;
+
+  function activateFreshPeer() {
+    if (
+      peerActivation !== null
+    ) {
+      return peerActivation;
     }
 
-    if (msg?.type === 'signal' && msg?.to) {
-      const room = ROOMS[meta.roomId];
-      if (!room) return;
-      const target = room.clients.get(msg.to);
-      if (target) {
-        safeSend(target, { type: 'signal', from: meta.peerId, data: msg.data });
+    const peerId =
+      randomUUID();
+
+    peerActivation =
+      registerPeerIdentity(
+        ws,
+        peerId,
+      );
+
+    return peerActivation;
+  }
+
+  ws.on(
+    'message',
+    async (buf) => {
+      let msg;
+
+      try {
+        msg =
+          JSON.parse(
+            buf.toString(),
+          );
+      } catch {
+        return;
       }
-      return;
-    }
 
-    if (msg?.type === 'requestStorage' && msg?.gameName && msg?.initRole) {
-      const room = ROOMS[meta.roomId];
-      if (!room) return;
-      const localPeer = room.clients.get(meta.peerId);
-
-      if (localPeer) {
-        const keypairCode = transformRoomId(room.keypair);
-        const keypair = {
-          public: randomPublicKey(keypairCode),
-          private: {
-            impolite: randomPrivateKeyImpolite(keypairCode).slice(-10),
-            polite: randomPrivateKeyPolite(keypairCode).slice(-10),
-          },
-        };
-        // 각 게임에 필요한 암호화된 sessionStorage key 생성
-        const STORAGE_DATA = await MAKE_STORAGE.findGame(msg.gameName, keypair, msg.initRole);
-        safeSend(localPeer, {
-          type: 'responseStorage',
-          storageData: STORAGE_DATA,
-          keypair: {
-            puk: keypair.public,
-            prk: msg.initRole === 'impolite' ? keypair.private.impolite : keypair.private.polite,
-          },
-          // keypair: keypair
-          //   .replace(/\s+/g, '') // 1. 띄어쓰기 제거
-          //   .replace(/[^a-zA-Z0-9가-힣]/g, '') // 2. 특수문자 제거
-          //   .slice(-10), // 3. 맨 뒤 10자리));,,
-        });
-      }
-    }
-  });
-
-  ws.on('close', () => {
-    const meta = localPeers.getMeta(ws);
-    if (!meta) return;
-    const { peerId, roomId } = meta;
-    const room = ROOMS[roomId];
-
-    if (room) {
-      if (room.clients.size === 2) {
-        // 두 peer 모두 있음
-        room.clients.delete(peerId);
-        broadcast(room, { type: 'partner-left', roomId, peerId });
-        room.lockAfterLeave = true;
-      } else if (room.clients.size === 1) {
-        if (room.paired) {
-          // 이전에 연결된 적 있음
-          room.lockAfterLeave = true;
-          // TOMBSTONES.set(roomId, { roomId, expiredAt: now() + ROOM_TTL_MS, lastSeenAt: now() });
-          TOMBSTONES.set(roomId, roomId);
-        } else {
-          // 내가 처음 진입하고 아직 상대 peer 없음
+      if (
+        msg?.type === 'join'
+      ) {
+        if (joinStarted) {
+          return;
         }
-        room.clients.delete(peerId);
-        delete ROOMS[roomId];
-      }
-    }
 
-    localPeers.remove(ws);
+        joinStarted =
+          true;
 
-    void presenceReady.then(
-      async (
-        presenceRegistered,
-      ) => {
-        activePeerIds.delete(
-          peerId,
-        );
+        const meta =
+          await activateFreshPeer();
 
         if (
-          !presenceRegistered
+          !meta ||
+          shuttingDown ||
+          ws.readyState !== ws.OPEN
         ) {
           return;
         }
 
-        try {
-          await peerDirectory.unregister(
-            peerId,
+        handleJoin(
+          ws,
+          meta,
+          msg,
+        );
+
+        return;
+      }
+
+      const meta =
+        localPeers.getMeta(
+          ws,
+        );
+
+      if (!meta) {
+        return;
+      }
+
+      if (
+        msg?.type === 'signal' &&
+        msg?.to
+      ) {
+        const room =
+          ROOMS[meta.roomId];
+
+        if (!room) {
+          return;
+        }
+
+        const target =
+          room.clients.get(
+            msg.to,
           );
-        } catch (error) {
-          console.error(
-            `[presence] failed to unregister peer ${peerId}:`,
-            error,
+
+        if (target) {
+          safeSend(
+            target,
+            {
+              type:
+                'signal',
+
+              from:
+                meta.peerId,
+
+              data:
+                msg.data,
+            },
           );
         }
-      },
-    );
-  });
+
+        return;
+      }
+
+      if (
+        msg?.type ===
+          'requestStorage' &&
+        msg?.gameName &&
+        msg?.initRole
+      ) {
+        const room =
+          ROOMS[meta.roomId];
+
+        if (!room) {
+          return;
+        }
+
+        const localPeer =
+          room.clients.get(
+            meta.peerId,
+          );
+
+        if (localPeer) {
+          const keypairCode =
+            transformRoomId(
+              room.keypair,
+            );
+
+          const keypair = {
+            public:
+              randomPublicKey(
+                keypairCode,
+              ),
+
+            private: {
+              impolite:
+                randomPrivateKeyImpolite(
+                  keypairCode,
+                ).slice(
+                  -10,
+                ),
+
+              polite:
+                randomPrivateKeyPolite(
+                  keypairCode,
+                ).slice(
+                  -10,
+                ),
+            },
+          };
+
+          const STORAGE_DATA =
+            await MAKE_STORAGE.findGame(
+              msg.gameName,
+              keypair,
+              msg.initRole,
+            );
+
+          safeSend(
+            localPeer,
+            {
+              type:
+                'responseStorage',
+
+              storageData:
+                STORAGE_DATA,
+
+              keypair: {
+                puk:
+                  keypair.public,
+
+                prk:
+                  msg.initRole ===
+                  'impolite'
+                    ? keypair
+                        .private
+                        .impolite
+                    : keypair
+                        .private
+                        .polite,
+              },
+            },
+          );
+        }
+      }
+    },
+  );
+
+  ws.on(
+    'close',
+    () => {
+      const meta =
+        localPeers.getMeta(
+          ws,
+        );
+
+      if (!meta) {
+        return;
+      }
+
+      const {
+        peerId,
+        roomId,
+      } = meta;
+
+      const room =
+        ROOMS[roomId];
+
+      if (room) {
+        if (
+          room.clients.size === 2
+        ) {
+          room.clients.delete(
+            peerId,
+          );
+
+          broadcast(
+            room,
+            {
+              type:
+                'partner-left',
+
+              roomId,
+              peerId,
+            },
+          );
+
+          room.lockAfterLeave =
+            true;
+        } else if (
+          room.clients.size === 1
+        ) {
+          if (room.paired) {
+            room.lockAfterLeave =
+              true;
+
+            TOMBSTONES.set(
+              roomId,
+              roomId,
+            );
+          }
+
+          room.clients.delete(
+            peerId,
+          );
+
+          delete ROOMS[
+            roomId
+          ];
+        }
+      }
+
+      localPeers.remove(
+        ws,
+      );
+
+      activePeerIds.delete(
+        peerId,
+      );
+
+      void peerDirectory
+        .unregister(
+          peerId,
+        )
+        .catch(
+          (error) => {
+            console.error(
+              `[presence] failed to unregister peer ${peerId}:`,
+              error,
+            );
+          },
+        );
+    },
+  );
 }
 
 wss.on('connection', cbConnection);

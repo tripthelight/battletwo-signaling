@@ -22,6 +22,9 @@ import {
   createResumeClaimManager,
 } from './resumeClaimManager.js';
 import {
+  createResumeConnectionManager,
+} from './resumeConnection.js';
+import {
   createResumeSessionStore,
 } from './resumeSession.js';
 import { redis } from './redis.js';
@@ -118,6 +121,15 @@ const resumeClaimManager =
 
     refreshMs:
       config.resumeClaimRefreshMs,
+  });
+
+const resumeConnectionManager =
+  createResumeConnectionManager({
+    store:
+      resumeSessionStore,
+
+    claimManager:
+      resumeClaimManager,
   });
 
 const INTERNAL_PAIR_ASSIGNMENT =
@@ -418,6 +430,191 @@ async function schedulePeerDisconnect(
   }
 }
 
+function makeResumeClaimLostHandler(
+  ws,
+  peerId,
+) {
+  return async ({
+    reason,
+    error,
+  }) => {
+    if (error) {
+      console.error(
+        `[resume] claim lost for peer ${peerId}: ${reason}`,
+        error,
+      );
+    } else {
+      console.error(
+        `[resume] claim lost for peer ${peerId}: ${reason}`,
+      );
+    }
+
+    if (
+      ws.readyState ===
+      ws.OPEN
+    ) {
+      ws.close(
+        1011,
+        'resume state lost',
+      );
+    }
+  };
+}
+
+async function removeUndeliveredResumeSession(
+  ws,
+  peerId,
+) {
+  try {
+    await resumeConnectionManager.remove(
+      ws,
+    );
+  } catch (error) {
+    console.error(
+      `[resume] failed to remove undelivered session for peer ${peerId}:`,
+      error,
+    );
+  }
+}
+
+async function issueResumeToken({
+  ws,
+  peerId,
+  roomId,
+  role,
+}) {
+  if (
+    shuttingDown ||
+    ws.readyState !==
+    ws.OPEN
+  ) {
+    return null;
+  }
+
+  let result;
+
+  try {
+    result =
+      await resumeConnectionManager.issue({
+        connection:
+          ws,
+
+        peerId,
+
+        roomId,
+
+        role,
+
+        onLost:
+          makeResumeClaimLostHandler(
+            ws,
+            peerId,
+          ),
+      });
+  } catch (error) {
+    console.error(
+      `[resume] failed to issue session for peer ${peerId}:`,
+      error,
+    );
+
+    if (
+      ws.readyState ===
+      ws.OPEN
+    ) {
+      ws.close(
+        1011,
+        'resume state unavailable',
+      );
+    }
+
+    return null;
+  }
+
+  if (
+    result.status !==
+      'issued' &&
+    result.status !==
+      'active'
+  ) {
+    console.error(
+      `[resume] failed to allocate token for peer ${peerId}: ${result.status}`,
+    );
+
+    if (
+      ws.readyState ===
+      ws.OPEN
+    ) {
+      ws.close(
+        1011,
+        'resume state unavailable',
+      );
+    }
+
+    return null;
+  }
+
+  if (
+    result.peerId !==
+      peerId ||
+    result.roomId !==
+      roomId ||
+    result.role !==
+      role
+  ) {
+    console.error(
+      `[resume] session identity mismatch for peer ${peerId}`,
+    );
+
+    await removeUndeliveredResumeSession(
+      ws,
+      peerId,
+    );
+
+    if (
+      ws.readyState ===
+      ws.OPEN
+    ) {
+      ws.close(
+        1011,
+        'invalid resume state',
+      );
+    }
+
+    return null;
+  }
+
+  if (
+    shuttingDown ||
+    ws.readyState !==
+      ws.OPEN
+  ) {
+    await removeUndeliveredResumeSession(
+      ws,
+      peerId,
+    );
+
+    return null;
+  }
+
+  return result.token;
+}
+
+async function releaseResumeConnection(
+  ws,
+  peerId,
+) {
+  try {
+    await resumeConnectionManager.release(
+      ws,
+    );
+  } catch (error) {
+    console.error(
+      `[resume] failed to release claim for peer ${peerId}:`,
+      error,
+    );
+  }
+}
+
 // ———————————————————————————————————————————————————
 
 const ROOM_TTL_MS = config.roomTtlMs;
@@ -599,6 +796,23 @@ async function applyInternalPairAssignment(
     return;
   }
 
+  const resumeToken =
+    await issueResumeToken({
+      ws,
+
+      peerId:
+        metaBefore.peerId,
+
+      roomId,
+
+      role:
+        'impolite',
+    });
+
+  if (!resumeToken) {
+    return;
+  }
+
   safeSend(
     ws,
     {
@@ -615,6 +829,8 @@ async function applyInternalPairAssignment(
 
       pairedDataChannel:
         null,
+
+      resumeToken,
     },
   );
 
@@ -1150,6 +1366,24 @@ async function handleFreshJoin(
       return;
     }
 
+    const resumeToken =
+      await issueResumeToken({
+        ws,
+
+        peerId:
+          meta.peerId,
+
+        roomId:
+          result.roomId,
+
+        role:
+          'polite',
+      });
+
+    if (!resumeToken) {
+      return;
+    }
+
     safeSend(
       ws,
       {
@@ -1167,6 +1401,8 @@ async function handleFreshJoin(
 
         pairedDataChannel:
           null,
+
+        resumeToken,
       },
     );
 
@@ -1636,6 +1872,19 @@ function cbConnection(ws, req) {
           ];
         }
       }
+
+      /*
+       * Resume session 자체는 삭제하지 않고
+       * 이 WebSocket connection이 소유한 claim만 해제한다.
+       *
+       * session은 resumeSessionTtlMs 동안 유지되어
+       * 다음 connection이 같은 resumeToken으로
+       * 다시 claim할 수 있다.
+       */
+      void releaseResumeConnection(
+        ws,
+        peerId,
+      );
 
       /*
        * Redis 기반 신규 room인 경우:

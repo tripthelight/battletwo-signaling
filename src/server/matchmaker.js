@@ -182,7 +182,8 @@ export function createMatchmaker({
 }) {
   if (
     !command ||
-    typeof command.eval !== 'function'
+    typeof command.eval !== 'function' ||
+    typeof command.zrem !== 'function'
   ) {
     throw new TypeError(
       'Redis command client is required',
@@ -468,7 +469,24 @@ export function createMatchmaker({
     );
   }
 
+  async function cancelWaiting(
+    peerId,
+  ) {
+    assertPeerId(
+      peerId,
+    );
+
+    const removed =
+      await command.zrem(
+        waitingKey,
+        peerId,
+      );
+
+    return removed > 0;
+  }
+
   return Object.freeze({
     match,
+    cancelWaiting,
   });
 }

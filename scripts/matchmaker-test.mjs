@@ -46,6 +46,32 @@ function createFakeCommand() {
   return {
     state,
 
+    async zrem(
+      waitingKey,
+      peerId,
+    ) {
+      assert.match(
+        waitingKey,
+        /:waiting$/,
+      );
+
+      const index =
+        state.waiting.indexOf(
+          peerId,
+        );
+
+      if (index === -1) {
+        return 0;
+      }
+
+      state.waiting.splice(
+        index,
+        1,
+      );
+
+      return 1;
+    },
+
     async eval(
       script,
       numberOfKeys,
@@ -714,6 +740,44 @@ await test(
       [
         'peer-a',
       ],
+    );
+  },
+);
+
+await test(
+  'cancel waiting peer',
+  async () => {
+    const command =
+      createFakeCommand();
+
+    command.state.waiting.push(
+      'peer-a',
+    );
+
+    const matchmaker =
+      createMatchmaker({
+        command,
+        keyPrefix:
+          'bt:test',
+      });
+
+    assert.equal(
+      await matchmaker.cancelWaiting(
+        'peer-a',
+      ),
+      true,
+    );
+
+    assert.deepEqual(
+      command.state.waiting,
+      [],
+    );
+
+    assert.equal(
+      await matchmaker.cancelWaiting(
+        'peer-a',
+      ),
+      false,
     );
   },
 );

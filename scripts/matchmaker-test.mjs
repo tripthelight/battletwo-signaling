@@ -84,6 +84,77 @@ function createFakeCommand() {
       proposedRoomId,
       nowMs,
     ) {
+      if (
+        script.includes(
+          '-- matchmaker:rollback-pair',
+        )
+      ) {
+        const roomId =
+          arguments[8];
+
+        const peerId =
+          arguments[6];
+
+        const partnerPeerId =
+          arguments[7];
+
+        const room =
+          state.rooms.get(
+            roomId,
+          );
+
+        if (!room) {
+          return 0;
+        }
+
+        const validPair =
+          (
+            room.impolite === peerId &&
+            room.polite === partnerPeerId
+          ) ||
+          (
+            room.impolite === partnerPeerId &&
+            room.polite === peerId
+          );
+
+        if (!validPair) {
+          return 0;
+        }
+
+        if (
+          state.peerRooms.get(
+            peerId,
+          ) !== roomId ||
+          state.peerRooms.get(
+            partnerPeerId,
+          ) !== roomId
+        ) {
+          return 0;
+        }
+
+        state.rooms.delete(
+          roomId,
+        );
+
+        state.peerRooms.delete(
+          peerId,
+        );
+
+        state.peerRooms.delete(
+          partnerPeerId,
+        );
+
+        state.waiting =
+          state.waiting.filter(
+            (waitingPeerId) =>
+              waitingPeerId !== peerId &&
+              waitingPeerId !==
+                partnerPeerId,
+          );
+
+        return 1;
+      }
+
       assert.equal(
         numberOfKeys,
         4,
@@ -778,6 +849,149 @@ await test(
         'peer-a',
       ),
       false,
+    );
+  },
+);
+
+await test(
+  'rollback exact pair',
+  async () => {
+    const command =
+      createFakeCommand();
+
+    command.state.present.add(
+      'peer-a',
+    );
+
+    command.state.present.add(
+      'peer-b',
+    );
+
+    const matchmaker =
+      createMatchmaker({
+        command,
+        keyPrefix:
+          'bt:test',
+      });
+
+    await matchmaker.match({
+      peerId:
+        'peer-a',
+
+      proposedRoomId:
+        'unused-a',
+
+      nowMs:
+        1000,
+    });
+
+    const paired =
+      await matchmaker.match({
+        peerId:
+          'peer-b',
+
+        proposedRoomId:
+          'room-ab',
+
+        nowMs:
+          1001,
+      });
+
+    assert.equal(
+      paired.status,
+      'paired',
+    );
+
+    assert.equal(
+      await matchmaker.rollbackPair({
+        roomId:
+          'room-ab',
+
+        peerId:
+          'peer-a',
+
+        partnerPeerId:
+          'peer-b',
+      }),
+      true,
+    );
+
+    assert.equal(
+      command.state.rooms.has(
+        'room-ab',
+      ),
+      false,
+    );
+
+    assert.equal(
+      command.state.peerRooms.has(
+        'peer-a',
+      ),
+      false,
+    );
+
+    assert.equal(
+      command.state.peerRooms.has(
+        'peer-b',
+      ),
+      false,
+    );
+  },
+);
+
+await test(
+  'reject rollback for wrong pair',
+  async () => {
+    const command =
+      createFakeCommand();
+
+    command.state.rooms.set(
+      'room-ab',
+      {
+        impolite:
+          'peer-a',
+
+        polite:
+          'peer-b',
+      },
+    );
+
+    command.state.peerRooms.set(
+      'peer-a',
+      'room-ab',
+    );
+
+    command.state.peerRooms.set(
+      'peer-b',
+      'room-ab',
+    );
+
+    const matchmaker =
+      createMatchmaker({
+        command,
+        keyPrefix:
+          'bt:test',
+      });
+
+    assert.equal(
+      await matchmaker.rollbackPair({
+        roomId:
+          'room-ab',
+
+        peerId:
+          'peer-a',
+
+        partnerPeerId:
+          'peer-x',
+      }),
+      false,
+    );
+
+    assert.equal(
+      command.state.rooms.has(
+        'room-ab',
+      ),
+      true,
     );
   },
 );

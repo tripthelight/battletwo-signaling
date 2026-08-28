@@ -469,6 +469,137 @@ export function createMatchmaker({
     );
   }
 
+  async function rollbackPair({
+    roomId,
+    peerId,
+    partnerPeerId,
+  }) {
+    assertRoomId(
+      roomId,
+    );
+
+    assertPeerId(
+      peerId,
+    );
+
+    assertPeerId(
+      partnerPeerId,
+    );
+
+    if (
+      peerId === partnerPeerId
+    ) {
+      throw new TypeError(
+        'paired peer ids must be different',
+      );
+    }
+
+    const roomKey =
+      makeRoomKey(
+        keyPrefix,
+        roomId,
+      );
+
+    const peerRoomKey =
+      makePeerRoomKey(
+        keyPrefix,
+        peerId,
+      );
+
+    const partnerRoomKey =
+      makePeerRoomKey(
+        keyPrefix,
+        partnerPeerId,
+      );
+
+    const result =
+      await command.eval(
+        `
+          -- matchmaker:rollback-pair
+
+          local members =
+            redis.call(
+              'HMGET',
+              KEYS[1],
+              'impolite',
+              'polite'
+            )
+
+          local impolite =
+            members[1]
+
+          local polite =
+            members[2]
+
+          if
+            not impolite or
+            not polite
+          then
+            return 0
+          end
+
+          local validPair =
+            (
+              impolite == ARGV[1] and
+              polite == ARGV[2]
+            ) or
+            (
+              impolite == ARGV[2] and
+              polite == ARGV[1]
+            )
+
+          if not validPair then
+            return 0
+          end
+
+          local peerRoomId =
+            redis.call(
+              'GET',
+              KEYS[2]
+            )
+
+          local partnerRoomId =
+            redis.call(
+              'GET',
+              KEYS[3]
+            )
+
+          if
+            peerRoomId ~= ARGV[3] or
+            partnerRoomId ~= ARGV[3]
+          then
+            return 0
+          end
+
+          redis.call(
+            'DEL',
+            KEYS[1],
+            KEYS[2],
+            KEYS[3]
+          )
+
+          redis.call(
+            'ZREM',
+            KEYS[4],
+            ARGV[1],
+            ARGV[2]
+          )
+
+          return 1
+        `,
+        4,
+        roomKey,
+        peerRoomKey,
+        partnerRoomKey,
+        waitingKey,
+        peerId,
+        partnerPeerId,
+        roomId,
+      );
+
+    return result === 1;
+  }
+
   async function cancelWaiting(
     peerId,
   ) {
@@ -487,6 +618,7 @@ export function createMatchmaker({
 
   return Object.freeze({
     match,
+    rollbackPair,
     cancelWaiting,
   });
 }

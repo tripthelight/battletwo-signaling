@@ -5,7 +5,13 @@ import { WebSocketServer } from 'ws';
 
 import { config } from './config.js';
 import { MAKE_STORAGE } from './functions/encryption/makeStorage.js';
+import {
+  createInstanceRelay,
+} from './instanceRelay.js';
 import { createPeerDirectory } from './peerDirectory.js';
+import {
+  createPeerMessenger,
+} from './peerMessenger.js';
 import {
   createResumeClaimManager,
 } from './resumeClaimManager.js';
@@ -33,6 +39,37 @@ const peerDirectory =
       redis.instanceId,
     ttlMs:
       config.peerPresenceTtlMs,
+  });
+
+const instanceRelay =
+  createInstanceRelay({
+    redisContext:
+      redis,
+
+    keyPrefix:
+      config.redisKeyPrefix,
+
+    peerRegistry:
+      localPeers,
+
+    deliver:
+      safeSend,
+  });
+
+const peerMessenger =
+  createPeerMessenger({
+    localPeers,
+
+    peerDirectory,
+
+    relay:
+      instanceRelay,
+
+    instanceId:
+      redis.instanceId,
+
+    deliver:
+      safeSend,
   });
 
 const resumeSessionStore =
@@ -816,6 +853,8 @@ function listenHttpServer() {
 async function startServer() {
   await redis.connect();
 
+  await instanceRelay.start();
+
   console.log(
     `[redis] connected as ${redis.instanceId}`,
   );
@@ -955,6 +994,8 @@ async function shutdown(
 
     await closeWebSocketServer();
 
+    await instanceRelay.stop();
+
     await closeHttpServer();
   } catch (error) {
     console.error(
@@ -987,7 +1028,7 @@ process.on(
 );
 
 void startServer().catch(
-  (error) => {
+  async (error) => {
     console.error(
       '[startup] failed:',
       error,
@@ -996,6 +1037,15 @@ void startServer().catch(
     stopPresenceRefresh();
 
     resumeClaimManager.stop();
+
+    try {
+      await instanceRelay.stop();
+    } catch (relayError) {
+      console.error(
+        '[relay] failed to stop:',
+        relayError,
+      );
+    }
 
     redis.disconnect();
 

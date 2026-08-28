@@ -3,6 +3,8 @@ import assert from 'node:assert/strict';
 import {
   createRoomMembership,
   makePeerRoomKey,
+  makeRoomCleanupKey,
+  makeRoomCleanupRoomKey,
   makeRoomKey,
 } from '../src/server/roomMembership.js';
 
@@ -32,6 +34,8 @@ async function test(
 function createFakeCommand({
   roomByPeer = {},
   rooms = {},
+  cleanupRoomByPeer = {},
+  cleanupDueByPeer = {},
 } = {}) {
   return {
     async get(key) {
@@ -66,6 +70,278 @@ function createFakeCommand({
       peerId,
       targetPeerId,
     ) {
+      if (
+        script.includes(
+          '-- room-membership:schedule-disconnect',
+        )
+      ) {
+        assert.equal(
+          numberOfKeys,
+          3,
+        );
+
+        const actualKeyPrefix =
+          arguments[5];
+
+        const actualPeerId =
+          arguments[6];
+
+        const dueAtMs =
+          arguments[7];
+
+        assert.ok(
+          peerRoomKey.startsWith(
+            `${actualKeyPrefix}:peer-room:`,
+          ),
+        );
+
+        assert.equal(
+          targetRoomKey,
+          `${actualKeyPrefix}:room-cleanup-room`,
+        );
+
+        assert.equal(
+          arguments[4],
+          `${actualKeyPrefix}:room-cleanup`,
+        );
+
+        const roomId =
+          roomByPeer[actualPeerId] ??
+          null;
+
+        if (!roomId) {
+          return null;
+        }
+
+        const room =
+          rooms[roomId];
+
+        if (
+          !room ||
+          (
+            room.impolite !== actualPeerId &&
+            room.polite !== actualPeerId
+          )
+        ) {
+          return null;
+        }
+
+        cleanupRoomByPeer[
+          actualPeerId
+        ] = roomId;
+
+        cleanupDueByPeer[
+          actualPeerId
+        ] = Number(dueAtMs);
+
+        return roomId;
+      }
+
+      if (
+        script.includes(
+          '-- room-membership:cancel-disconnect',
+        )
+      ) {
+        assert.equal(
+          numberOfKeys,
+          2,
+        );
+
+        const actualPeerId =
+          arguments[4];
+
+        const existed =
+          Object.hasOwn(
+            cleanupDueByPeer,
+            actualPeerId,
+          );
+
+        delete cleanupDueByPeer[
+          actualPeerId
+        ];
+
+        delete cleanupRoomByPeer[
+          actualPeerId
+        ];
+
+        return existed
+          ? 1
+          : 0;
+      }
+
+      if (
+        script.includes(
+          '-- room-membership:cleanup-due',
+        )
+      ) {
+        assert.equal(
+          numberOfKeys,
+          2,
+        );
+
+        const nowMs =
+          Number(
+            arguments[5],
+          );
+
+        const limit =
+          Number(
+            arguments[6],
+          );
+
+        const candidates =
+          Object.entries(
+            cleanupDueByPeer,
+          )
+            .filter(
+              ([, dueAtMs]) =>
+                dueAtMs <= nowMs,
+            )
+            .sort(
+              (
+                [peerA, dueA],
+                [peerB, dueB],
+              ) =>
+                dueA - dueB ||
+                peerA.localeCompare(
+                  peerB,
+                ),
+            )
+            .slice(
+              0,
+              limit,
+            )
+            .map(
+              ([candidatePeerId]) =>
+                candidatePeerId,
+            );
+
+        const cleaned = [];
+
+        for (
+          const candidatePeerId
+          of candidates
+        ) {
+          const scheduledRoomId =
+            cleanupRoomByPeer[
+              candidatePeerId
+            ];
+
+          if (!scheduledRoomId) {
+            delete cleanupDueByPeer[
+              candidatePeerId
+            ];
+
+            continue;
+          }
+
+          const currentRoomId =
+            roomByPeer[
+              candidatePeerId
+            ];
+
+          if (
+            currentRoomId !==
+            scheduledRoomId
+          ) {
+            delete cleanupDueByPeer[
+              candidatePeerId
+            ];
+
+            delete cleanupRoomByPeer[
+              candidatePeerId
+            ];
+
+            continue;
+          }
+
+          const room =
+            rooms[
+              scheduledRoomId
+            ];
+
+          if (
+            !room ||
+            !room.impolite ||
+            !room.polite ||
+            (
+              room.impolite !==
+                candidatePeerId &&
+              room.polite !==
+                candidatePeerId
+            )
+          ) {
+            delete cleanupDueByPeer[
+              candidatePeerId
+            ];
+
+            delete cleanupRoomByPeer[
+              candidatePeerId
+            ];
+
+            continue;
+          }
+
+          const partnerPeerId =
+            room.impolite ===
+            candidatePeerId
+              ? room.polite
+              : room.impolite;
+
+          if (
+            roomByPeer[
+              partnerPeerId
+            ] !== scheduledRoomId
+          ) {
+            delete cleanupDueByPeer[
+              candidatePeerId
+            ];
+
+            delete cleanupRoomByPeer[
+              candidatePeerId
+            ];
+
+            continue;
+          }
+
+          delete rooms[
+            scheduledRoomId
+          ];
+
+          delete roomByPeer[
+            candidatePeerId
+          ];
+
+          delete roomByPeer[
+            partnerPeerId
+          ];
+
+          delete cleanupDueByPeer[
+            candidatePeerId
+          ];
+
+          delete cleanupDueByPeer[
+            partnerPeerId
+          ];
+
+          delete cleanupRoomByPeer[
+            candidatePeerId
+          ];
+
+          delete cleanupRoomByPeer[
+            partnerPeerId
+          ];
+
+          cleaned.push(
+            scheduledRoomId,
+            candidatePeerId,
+            partnerPeerId,
+          );
+        }
+
+        return cleaned;
+      }
+
       assert.equal(
         numberOfKeys,
         2,
@@ -351,6 +627,422 @@ await test(
         'peer-a',
       ),
       null,
+    );
+  },
+);
+
+await test(
+  'build room cleanup keys',
+  async () => {
+    assert.equal(
+      makeRoomCleanupKey(
+        'bt:test',
+      ),
+      'bt:test:room-cleanup',
+    );
+
+    assert.equal(
+      makeRoomCleanupRoomKey(
+        'bt:test',
+      ),
+      'bt:test:room-cleanup-room',
+    );
+  },
+);
+
+await test(
+  'schedule peer disconnect',
+  async () => {
+    const cleanupRoomByPeer =
+      {};
+
+    const cleanupDueByPeer =
+      {};
+
+    const membership =
+      createRoomMembership({
+        keyPrefix:
+          'bt:test',
+
+        command:
+          createFakeCommand({
+            roomByPeer: {
+              'peer-a':
+                'room-1',
+            },
+
+            rooms: {
+              'room-1': {
+                impolite:
+                  'peer-a',
+
+                polite:
+                  'peer-b',
+              },
+            },
+
+            cleanupRoomByPeer,
+            cleanupDueByPeer,
+          }),
+      });
+
+    assert.equal(
+      await membership.scheduleDisconnect({
+        peerId:
+          'peer-a',
+
+        dueAtMs:
+          15_000,
+      }),
+      'room-1',
+    );
+
+    assert.equal(
+      cleanupRoomByPeer[
+        'peer-a'
+      ],
+      'room-1',
+    );
+
+    assert.equal(
+      cleanupDueByPeer[
+        'peer-a'
+      ],
+      15_000,
+    );
+  },
+);
+
+await test(
+  'reject disconnect without valid room',
+  async () => {
+    const membership =
+      createRoomMembership({
+        keyPrefix:
+          'bt:test',
+
+        command:
+          createFakeCommand(),
+      });
+
+    assert.equal(
+      await membership.scheduleDisconnect({
+        peerId:
+          'peer-a',
+
+        dueAtMs:
+          15_000,
+      }),
+      null,
+    );
+  },
+);
+
+await test(
+  'cancel scheduled disconnect',
+  async () => {
+    const cleanupRoomByPeer = {
+      'peer-a':
+        'room-1',
+    };
+
+    const cleanupDueByPeer = {
+      'peer-a':
+        15_000,
+    };
+
+    const membership =
+      createRoomMembership({
+        keyPrefix:
+          'bt:test',
+
+        command:
+          createFakeCommand({
+            cleanupRoomByPeer,
+            cleanupDueByPeer,
+          }),
+      });
+
+    assert.equal(
+      await membership.cancelDisconnect(
+        'peer-a',
+      ),
+      true,
+    );
+
+    assert.equal(
+      cleanupRoomByPeer[
+        'peer-a'
+      ],
+      undefined,
+    );
+
+    assert.equal(
+      cleanupDueByPeer[
+        'peer-a'
+      ],
+      undefined,
+    );
+
+    assert.equal(
+      await membership.cancelDisconnect(
+        'peer-a',
+      ),
+      false,
+    );
+  },
+);
+
+await test(
+  'cleanup expired room',
+  async () => {
+    const roomByPeer = {
+      'peer-a':
+        'room-1',
+
+      'peer-b':
+        'room-1',
+    };
+
+    const rooms = {
+      'room-1': {
+        impolite:
+          'peer-a',
+
+        polite:
+          'peer-b',
+      },
+    };
+
+    const cleanupRoomByPeer = {
+      'peer-a':
+        'room-1',
+
+      'peer-b':
+        'room-1',
+    };
+
+    const cleanupDueByPeer = {
+      'peer-a':
+        15_000,
+
+      'peer-b':
+        20_000,
+    };
+
+    const membership =
+      createRoomMembership({
+        keyPrefix:
+          'bt:test',
+
+        command:
+          createFakeCommand({
+            roomByPeer,
+            rooms,
+            cleanupRoomByPeer,
+            cleanupDueByPeer,
+          }),
+      });
+
+    assert.deepEqual(
+      await membership.cleanupDue({
+        nowMs:
+          15_000,
+      }),
+      [
+        {
+          roomId:
+            'room-1',
+
+          expiredPeerId:
+            'peer-a',
+
+          partnerPeerId:
+            'peer-b',
+        },
+      ],
+    );
+
+    assert.equal(
+      rooms['room-1'],
+      undefined,
+    );
+
+    assert.equal(
+      roomByPeer['peer-a'],
+      undefined,
+    );
+
+    assert.equal(
+      roomByPeer['peer-b'],
+      undefined,
+    );
+
+    assert.deepEqual(
+      cleanupRoomByPeer,
+      {},
+    );
+
+    assert.deepEqual(
+      cleanupDueByPeer,
+      {},
+    );
+  },
+);
+
+await test(
+  'preserve room before cleanup deadline',
+  async () => {
+    const roomByPeer = {
+      'peer-a':
+        'room-1',
+
+      'peer-b':
+        'room-1',
+    };
+
+    const rooms = {
+      'room-1': {
+        impolite:
+          'peer-a',
+
+        polite:
+          'peer-b',
+      },
+    };
+
+    const cleanupRoomByPeer = {
+      'peer-a':
+        'room-1',
+    };
+
+    const cleanupDueByPeer = {
+      'peer-a':
+        15_000,
+    };
+
+    const membership =
+      createRoomMembership({
+        keyPrefix:
+          'bt:test',
+
+        command:
+          createFakeCommand({
+            roomByPeer,
+            rooms,
+            cleanupRoomByPeer,
+            cleanupDueByPeer,
+          }),
+      });
+
+    assert.deepEqual(
+      await membership.cleanupDue({
+        nowMs:
+          14_999,
+      }),
+      [],
+    );
+
+    assert.equal(
+      roomByPeer['peer-a'],
+      'room-1',
+    );
+
+    assert.ok(
+      rooms['room-1'],
+    );
+
+    assert.equal(
+      cleanupDueByPeer[
+        'peer-a'
+      ],
+      15_000,
+    );
+  },
+);
+
+await test(
+  'discard stale cleanup without deleting current room',
+  async () => {
+    const roomByPeer = {
+      'peer-a':
+        'room-2',
+
+      'peer-c':
+        'room-2',
+    };
+
+    const rooms = {
+      'room-1': {
+        impolite:
+          'peer-a',
+
+        polite:
+          'peer-b',
+      },
+
+      'room-2': {
+        impolite:
+          'peer-a',
+
+        polite:
+          'peer-c',
+      },
+    };
+
+    const cleanupRoomByPeer = {
+      'peer-a':
+        'room-1',
+    };
+
+    const cleanupDueByPeer = {
+      'peer-a':
+        15_000,
+    };
+
+    const membership =
+      createRoomMembership({
+        keyPrefix:
+          'bt:test',
+
+        command:
+          createFakeCommand({
+            roomByPeer,
+            rooms,
+            cleanupRoomByPeer,
+            cleanupDueByPeer,
+          }),
+      });
+
+    assert.deepEqual(
+      await membership.cleanupDue({
+        nowMs:
+          15_000,
+      }),
+      [],
+    );
+
+    assert.equal(
+      roomByPeer['peer-a'],
+      'room-2',
+    );
+
+    assert.ok(
+      rooms['room-2'],
+    );
+
+    assert.equal(
+      cleanupRoomByPeer[
+        'peer-a'
+      ],
+      undefined,
+    );
+
+    assert.equal(
+      cleanupDueByPeer[
+        'peer-a'
+      ],
+      undefined,
     );
   },
 );

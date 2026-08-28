@@ -16,6 +16,9 @@ import {
   createPeerMessenger,
 } from './peerMessenger.js';
 import {
+  createRoomMembership,
+} from './roomMembership.js';
+import {
   createResumeClaimManager,
 } from './resumeClaimManager.js';
 import {
@@ -56,7 +59,7 @@ const instanceRelay =
       localPeers,
 
     deliver:
-      safeSend,
+      deliverPeerPayload,
   });
 
 const peerMessenger =
@@ -72,11 +75,20 @@ const peerMessenger =
       redis.instanceId,
 
     deliver:
-      safeSend,
+      deliverPeerPayload,
   });
 
 const matchmaker =
   createMatchmaker({
+    command:
+      redis.command,
+
+    keyPrefix:
+      config.redisKeyPrefix,
+  });
+
+const roomMembership =
+  createRoomMembership({
     command:
       redis.command,
 
@@ -107,6 +119,9 @@ const resumeClaimManager =
     refreshMs:
       config.resumeClaimRefreshMs,
   });
+
+const INTERNAL_PAIR_ASSIGNMENT =
+  '__internal-pair-assignment';
 
 const activePeerIds =
   new Set();
@@ -323,6 +338,159 @@ function randomPrivateKeyPolite(str) {
   }).join('');
 }
 
+function isNonEmptyInternalId(
+  value,
+) {
+  return (
+    typeof value === 'string' &&
+    value.length > 0 &&
+    value.length <= 128
+  );
+}
+
+async function applyInternalPairAssignment(
+  ws,
+  payload,
+) {
+  const metaBefore =
+    localPeers.getMeta(
+      ws,
+    );
+
+  if (
+    !metaBefore ||
+    ws.readyState !== ws.OPEN
+  ) {
+    return;
+  }
+
+  const {
+    roomId,
+    partnerPeerId,
+  } = payload ?? {};
+
+  if (
+    !isNonEmptyInternalId(
+      roomId,
+    ) ||
+    !isNonEmptyInternalId(
+      partnerPeerId,
+    ) ||
+    partnerPeerId ===
+      metaBefore.peerId
+  ) {
+    return;
+  }
+
+  let confirmedRoomId;
+
+  try {
+    confirmedRoomId =
+      await roomMembership.arePartners(
+        metaBefore.peerId,
+        partnerPeerId,
+      );
+  } catch (error) {
+    console.error(
+      `[matchmaking] failed to verify pair for ${metaBefore.peerId}:`,
+      error,
+    );
+
+    return;
+  }
+
+  const metaAfter =
+    localPeers.getMeta(
+      ws,
+    );
+
+  if (
+    !metaAfter ||
+    metaAfter.peerId !==
+      metaBefore.peerId ||
+    ws.readyState !== ws.OPEN ||
+    confirmedRoomId !== roomId
+  ) {
+    return;
+  }
+
+  if (
+    !localPeers.setRoomId(
+      ws,
+      roomId,
+    )
+  ) {
+    return;
+  }
+
+  safeSend(
+    ws,
+    {
+      type:
+        'room-assigned',
+
+      roomId,
+
+      peerId:
+        metaBefore.peerId,
+
+      role:
+        'impolite',
+
+      pairedDataChannel:
+        null,
+    },
+  );
+
+  safeSend(
+    ws,
+    {
+      type:
+        'paired',
+
+      roomId,
+
+      you: {
+        peerId:
+          metaBefore.peerId,
+
+        role:
+          'impolite',
+      },
+
+      partner: {
+        peerId:
+          partnerPeerId,
+
+        role:
+          'polite',
+      },
+    },
+  );
+}
+
+function deliverPeerPayload(
+  ws,
+  payload,
+) {
+  if (
+    payload?.type ===
+    INTERNAL_PAIR_ASSIGNMENT
+  ) {
+    void applyInternalPairAssignment(
+      ws,
+      payload,
+    );
+
+    return;
+  }
+
+  safeSend(
+    ws,
+    payload,
+  );
+}
+
 function safeSend(ws, obj) {
   if (ws.readyState === ws.OPEN) {
     ws.send(JSON.stringify(obj));
@@ -407,7 +575,11 @@ function attachToRoom(params) {
     }
   }
 }
-function handleJoin(ws, meta, msg) {
+async function handleJoin(
+  ws,
+  meta,
+  msg,
+) {
   // msg: { type:'join', roomHint?: string }
   const requested = typeof msg.roomHint === 'string' ? msg.roomHint : null;
 
@@ -449,9 +621,291 @@ function handleJoin(ws, meta, msg) {
   // let room = findWaitingRoom();
   // if (!room) room = createRoom();
   // attachToRoom(ws, meta, room);
-  params.room = findWaitingRoom();
-  if (!params.room) params.room = createRoom();
-  attachToRoom(params);
+  await handleFreshJoin(
+    ws,
+    meta,
+  );
+}
+
+async function handleFreshJoin(
+  ws,
+  meta,
+) {
+  const MAX_MATCH_ATTEMPTS =
+    3;
+
+  for (
+    let attempt = 0;
+    attempt < MAX_MATCH_ATTEMPTS;
+    attempt += 1
+  ) {
+    let result;
+
+    try {
+      result =
+        await matchmaker.match({
+          peerId:
+            meta.peerId,
+
+          proposedRoomId:
+            randomUUID(),
+        });
+    } catch (error) {
+      console.error(
+        `[matchmaking] failed for peer ${meta.peerId}:`,
+        error,
+      );
+
+      if (
+        ws.readyState === ws.OPEN
+      ) {
+        ws.close(
+          1011,
+          'matchmaking unavailable',
+        );
+      }
+
+      return;
+    }
+
+    if (
+      shuttingDown ||
+      ws.readyState !== ws.OPEN
+    ) {
+      if (
+        result.status ===
+        'waiting'
+      ) {
+        await cancelPeerWaiting(
+          meta.peerId,
+        );
+      }
+
+      if (
+        result.status ===
+        'paired'
+      ) {
+        try {
+          await matchmaker.rollbackPair({
+            roomId:
+              result.roomId,
+
+            peerId:
+              meta.peerId,
+
+            partnerPeerId:
+              result.partnerPeerId,
+          });
+        } catch (error) {
+          console.error(
+            `[matchmaking] failed to rollback room ${result.roomId}:`,
+            error,
+          );
+        }
+      }
+
+      return;
+    }
+
+    if (
+      result.status ===
+      'waiting'
+    ) {
+      return;
+    }
+
+    if (
+      result.status ===
+      'collision'
+    ) {
+      continue;
+    }
+
+    if (
+      result.status ===
+      'unavailable'
+    ) {
+      ws.close(
+        1011,
+        'matchmaking unavailable',
+      );
+
+      return;
+    }
+
+    if (
+      result.status ===
+      'existing'
+    ) {
+      console.error(
+        `[matchmaking] unexpected existing room for fresh peer ${meta.peerId}`,
+      );
+
+      ws.close(
+        1011,
+        'invalid matchmaking state',
+      );
+
+      return;
+    }
+
+    if (
+      result.status !==
+      'paired'
+    ) {
+      ws.close(
+        1011,
+        'invalid matchmaking result',
+      );
+
+      return;
+    }
+
+    let delivery;
+
+    try {
+      delivery =
+        await peerMessenger.send({
+          targetPeerId:
+            result.partnerPeerId,
+
+          payload: {
+            type:
+              INTERNAL_PAIR_ASSIGNMENT,
+
+            roomId:
+              result.roomId,
+
+            partnerPeerId:
+              meta.peerId,
+          },
+        });
+    } catch (error) {
+      console.error(
+        `[matchmaking] failed to route pair ${result.roomId}:`,
+        error,
+      );
+
+      delivery = {
+        accepted:
+          false,
+      };
+    }
+
+    if (
+      !delivery.accepted
+    ) {
+      try {
+        await matchmaker.rollbackPair({
+          roomId:
+            result.roomId,
+
+          peerId:
+            meta.peerId,
+
+          partnerPeerId:
+            result.partnerPeerId,
+        });
+      } catch (error) {
+        console.error(
+          `[matchmaking] failed to rollback room ${result.roomId}:`,
+          error,
+        );
+
+        ws.close(
+          1011,
+          'matchmaking cleanup failed',
+        );
+
+        return;
+      }
+
+      continue;
+    }
+
+    if (
+      shuttingDown ||
+      ws.readyState !== ws.OPEN
+    ) {
+      return;
+    }
+
+    if (
+      !localPeers.setRoomId(
+        ws,
+        result.roomId,
+      )
+    ) {
+      console.error(
+        `[matchmaking] failed to assign local room for ${meta.peerId}`,
+      );
+
+      ws.close(
+        1011,
+        'matchmaking state unavailable',
+      );
+
+      return;
+    }
+
+    safeSend(
+      ws,
+      {
+        type:
+          'room-assigned',
+
+        roomId:
+          result.roomId,
+
+        peerId:
+          meta.peerId,
+
+        role:
+          'polite',
+
+        pairedDataChannel:
+          null,
+      },
+    );
+
+    safeSend(
+      ws,
+      {
+        type:
+          'paired',
+
+        roomId:
+          result.roomId,
+
+        you: {
+          peerId:
+            meta.peerId,
+
+          role:
+            'polite',
+        },
+
+        partner: {
+          peerId:
+            result.partnerPeerId,
+
+          role:
+            'impolite',
+        },
+      },
+    );
+
+    return;
+  }
+
+  if (
+    ws.readyState === ws.OPEN
+  ) {
+    ws.close(
+      1011,
+      'matchmaking collision',
+    );
+  }
 }
 
 async function cancelPeerWaiting(
@@ -611,11 +1065,27 @@ function cbConnection(ws, req) {
           return;
         }
 
-        handleJoin(
-          ws,
-          meta,
-          msg,
-        );
+        try {
+          await handleJoin(
+            ws,
+            meta,
+            msg,
+          );
+        } catch (error) {
+          console.error(
+            `[join] failed for peer ${meta.peerId}:`,
+            error,
+          );
+
+          if (
+            ws.readyState === ws.OPEN
+          ) {
+            ws.close(
+              1011,
+              'join failed',
+            );
+          }
+        }
 
         return;
       }
@@ -633,31 +1103,70 @@ function cbConnection(ws, req) {
         msg?.type === 'signal' &&
         msg?.to
       ) {
-        const room =
-          ROOMS[meta.roomId];
+        let roomId;
 
-        if (!room) {
+        try {
+          roomId =
+            await roomMembership.arePartners(
+              meta.peerId,
+              msg.to,
+            );
+        } catch (error) {
+          console.error(
+            `[signal] failed to verify peers ${meta.peerId} -> ${msg.to}:`,
+            error,
+          );
+
           return;
         }
 
-        const target =
-          room.clients.get(
-            msg.to,
+        if (!roomId) {
+          return;
+        }
+
+        if (
+          meta.roomId !== roomId
+        ) {
+          console.error(
+            `[signal] local room mismatch for peer ${meta.peerId}`,
           );
 
-        if (target) {
-          safeSend(
-            target,
-            {
-              type:
-                'signal',
+          return;
+        }
 
-              from:
-                meta.peerId,
+        let delivery;
 
-              data:
-                msg.data,
-            },
+        try {
+          delivery =
+            await peerMessenger.send({
+              targetPeerId:
+                msg.to,
+
+              payload: {
+                type:
+                  'signal',
+
+                from:
+                  meta.peerId,
+
+                data:
+                  msg.data,
+              },
+            });
+        } catch (error) {
+          console.error(
+            `[signal] failed to route ${meta.peerId} -> ${msg.to}:`,
+            error,
+          );
+
+          return;
+        }
+
+        if (
+          !delivery.accepted
+        ) {
+          console.warn(
+            `[signal] target unavailable ${meta.peerId} -> ${msg.to}`,
           );
         }
 

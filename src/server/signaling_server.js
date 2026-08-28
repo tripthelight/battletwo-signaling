@@ -123,6 +123,12 @@ const resumeClaimManager =
 const INTERNAL_PAIR_ASSIGNMENT =
   '__internal-pair-assignment';
 
+const ROOM_CLEANUP_SWEEP_MS =
+  1_000;
+
+const ROOM_CLEANUP_BATCH_SIZE =
+  100;
+
 const activePeerIds =
   new Set();
 
@@ -130,6 +136,12 @@ let presenceRefreshRunning =
   false;
 
 let presenceRefreshTimer =
+  null;
+
+let roomCleanupRunning =
+  false;
+
+let roomCleanupTimer =
   null;
 
 let shuttingDown =
@@ -264,6 +276,148 @@ function stopPresenceRefresh() {
     null;
 }
 
+async function notifyExpiredRoomPartner({
+  roomId,
+  expiredPeerId,
+  partnerPeerId,
+}) {
+  let delivery;
+
+  try {
+    delivery =
+      await peerMessenger.send({
+        targetPeerId:
+          partnerPeerId,
+
+        payload: {
+          type:
+            'partner-left',
+
+          roomId,
+
+          peerId:
+            expiredPeerId,
+        },
+      });
+  } catch (error) {
+    console.error(
+      `[room-cleanup] failed to notify partner ${partnerPeerId} for room ${roomId}:`,
+      error,
+    );
+
+    return;
+  }
+
+  if (
+    !delivery.accepted
+  ) {
+    console.warn(
+      `[room-cleanup] partner ${partnerPeerId} unavailable for expired room ${roomId}`,
+    );
+  }
+}
+
+async function sweepRoomCleanup() {
+  if (
+    shuttingDown ||
+    roomCleanupRunning
+  ) {
+    return;
+  }
+
+  roomCleanupRunning =
+    true;
+
+  try {
+    const cleaned =
+      await roomMembership.cleanupDue({
+        nowMs:
+          Date.now(),
+
+        limit:
+          ROOM_CLEANUP_BATCH_SIZE,
+      });
+
+    for (
+      const cleanup
+      of cleaned
+    ) {
+      console.log(
+        `[room-cleanup] expired room ${cleanup.roomId} after peer ${cleanup.expiredPeerId} disconnect`,
+      );
+
+      await notifyExpiredRoomPartner(
+        cleanup,
+      );
+    }
+  } catch (error) {
+    console.error(
+      '[room-cleanup] sweep failed:',
+      error,
+    );
+  } finally {
+    roomCleanupRunning =
+      false;
+  }
+}
+
+function startRoomCleanupSweep() {
+  void sweepRoomCleanup();
+
+  roomCleanupTimer =
+    setInterval(
+      () => {
+        void sweepRoomCleanup();
+      },
+      ROOM_CLEANUP_SWEEP_MS,
+    );
+
+  roomCleanupTimer.unref();
+}
+
+function stopRoomCleanupSweep() {
+  if (
+    roomCleanupTimer === null
+  ) {
+    return;
+  }
+
+  clearInterval(
+    roomCleanupTimer,
+  );
+
+  roomCleanupTimer =
+    null;
+}
+
+async function schedulePeerDisconnect(
+  peerId,
+) {
+  try {
+    const roomId =
+      await roomMembership.scheduleDisconnect({
+        peerId,
+
+        dueAtMs:
+          Date.now() +
+          config.resumeSessionTtlMs,
+      });
+
+    if (!roomId) {
+      return;
+    }
+
+    console.log(
+      `[room-cleanup] scheduled room ${roomId} for disconnected peer ${peerId}`,
+    );
+  } catch (error) {
+    console.error(
+      `[room-cleanup] failed to schedule disconnected peer ${peerId}:`,
+      error,
+    );
+  }
+}
+
 // ———————————————————————————————————————————————————
 
 const ROOM_TTL_MS = config.roomTtlMs;
@@ -312,6 +466,7 @@ function randomPublicKey(str) {
     })
     .join('');
 }
+
 // RANDOM PRIVATE KEY - IMPOLITE
 // 각 문자의 charCode를 숫자로 바꾼 뒤 위치 인덱스를 섞어서 문자/숫자로 재매핑
 function randomPrivateKeyImpolite(str) {
@@ -319,23 +474,44 @@ function randomPrivateKeyImpolite(str) {
     .map((ch, i) => {
       const code = ch.charCodeAt(0) + i;
       return i % 2 === 0
-        ? String.fromCharCode((code % 26) + 97) // a-z
-        : code % 10; // 0-9
+        ? String.fromCharCode((code % 26) + 97)
+        : code % 10;
     })
     .join('');
 }
+
 // RANDOM PRIVATE KEY - POLITE
 // 문자열 전체를 하나의 숫자로 누적 -> 누적값을 기준으로 각 자리 결정
 function randomPrivateKeyPolite(str) {
   let seed = 0;
+
   for (const ch of str) {
-    seed = (seed * 31 + ch.charCodeAt(0)) >>> 0;
+    seed =
+      (
+        seed * 31 +
+        ch.charCodeAt(0)
+      ) >>> 0;
   }
 
-  return Array.from({ length: 10 }, (_, i) => {
-    const v = (seed >> (i * 3)) & 0xff;
-    return i % 2 === 0 ? String.fromCharCode(97 + (v % 26)) : v % 10;
-  }).join('');
+  return Array.from(
+    {
+      length: 10,
+    },
+    (_, i) => {
+      const v =
+        (
+          seed >>
+          (i * 3)
+        ) & 0xff;
+
+      return i % 2 === 0
+        ? String.fromCharCode(
+            97 +
+            (v % 26),
+          )
+        : v % 10;
+    },
+  ).join('');
 }
 
 function isNonEmptyInternalId(
@@ -496,24 +672,35 @@ function safeSend(ws, obj) {
     ws.send(JSON.stringify(obj));
   }
 }
+
 function findWaitingRoom() {
   for (const id in ROOMS) {
     const room = ROOMS[id];
-    if (room && !room.lockAfterLeave && room.clients.size === 1) {
+
+    if (
+      room &&
+      !room.lockAfterLeave &&
+      room.clients.size === 1
+    ) {
       return room;
     }
   }
+
   return null;
 }
+
 function createRoom() {
   const id = makeRoomId();
+
   ROOMS[id] = {
     id,
     clients: new Map(),
     keypair: keypairCode(id),
   };
+
   return ROOMS[id];
 }
+
 function createRoomWithId(roomId) {
   ROOMS[roomId] = {
     id: roomId,
@@ -522,105 +709,216 @@ function createRoomWithId(roomId) {
     paired: true,
     lockAfterLeave: true,
   };
+
   return ROOMS[roomId];
 }
+
 function broadcast(room, obj) {
-  for (const [, sock] of room.clients) {
-    safeSend(sock, obj);
+  for (
+    const [, sock]
+    of room.clients
+  ) {
+    safeSend(
+      sock,
+      obj,
+    );
   }
 }
 
 // function attachToRoom(ws, meta, room, pairedDataChannel) {
 function attachToRoom(params) {
-  const { ws, meta, room, pairedDataChannel } = params;
-  room.clients.set(meta.peerId, ws);
+  const {
+    ws,
+    meta,
+    room,
+    pairedDataChannel,
+  } = params;
 
-  if (!localPeers.setRoomId(ws, room.id)) {
+  room.clients.set(
+    meta.peerId,
+    ws,
+  );
+
+  if (
+    !localPeers.setRoomId(
+      ws,
+      room.id,
+    )
+  ) {
     throw new Error(
       `failed to assign room to peer ${meta.peerId}`,
     );
   }
 
-  // 역할 부여
-  const role = room.clients.size === 1 ? 'impolite' : 'polite';
-  safeSend(ws, {
-    type: 'room-assigned',
-    roomId: room.id,
-    peerId: meta.peerId,
-    role,
-    pairedDataChannel,
-    // keypair: room.keypair
-    //   .replace(/\s+/g, '') // 1. 띄어쓰기 제거
-    //   .replace(/[^a-zA-Z0-9가-힣]/g, '') // 2. 특수문자 제거
-    //   .slice(-10), // 3. 맨 뒤 10자리));,
-  });
+  const role =
+    room.clients.size === 1
+      ? 'impolite'
+      : 'polite';
 
-  if (room.clients.size === 2) {
-    const peers = Array.from(room.clients.keys());
-    const [impolitePeerId, politePeerId] = peers; // 먼저 들어온 순
-    for (const [id, sock] of room.clients) {
-      const partnerId = id === impolitePeerId ? politePeerId : impolitePeerId;
-      const role = id === impolitePeerId ? 'impolite' : 'polite';
-      safeSend(sock, {
-        type: 'paired',
-        roomId: room.id,
-        // roomId: `${room.id}-${role === 'impolite' ? 'a' : 'b'}`,
-        you: { peerId: id, role },
-        partner: { peerId: partnerId, role: role === 'impolite' ? 'polite' : 'impolite' },
-      });
+  safeSend(
+    ws,
+    {
+      type:
+        'room-assigned',
+
+      roomId:
+        room.id,
+
+      peerId:
+        meta.peerId,
+
+      role,
+
+      pairedDataChannel,
+    },
+  );
+
+  if (
+    room.clients.size === 2
+  ) {
+    const peers =
+      Array.from(
+        room.clients.keys(),
+      );
+
+    const [
+      impolitePeerId,
+      politePeerId,
+    ] = peers;
+
+    for (
+      const [
+        id,
+        sock,
+      ]
+      of room.clients
+    ) {
+      const partnerId =
+        id === impolitePeerId
+          ? politePeerId
+          : impolitePeerId;
+
+      const currentRole =
+        id === impolitePeerId
+          ? 'impolite'
+          : 'polite';
+
+      safeSend(
+        sock,
+        {
+          type:
+            'paired',
+
+          roomId:
+            room.id,
+
+          you: {
+            peerId:
+              id,
+
+            role:
+              currentRole,
+          },
+
+          partner: {
+            peerId:
+              partnerId,
+
+            role:
+              currentRole ===
+              'impolite'
+                ? 'polite'
+                : 'impolite',
+          },
+        },
+      );
     }
+
     room.paired = true;
-    if (room.lockAfterLeave) {
-      delete room['lockAfterLeave'];
+
+    if (
+      room.lockAfterLeave
+    ) {
+      delete room[
+        'lockAfterLeave'
+      ];
     }
   }
 }
+
 async function handleJoin(
   ws,
   meta,
   msg,
 ) {
-  // msg: { type:'join', roomHint?: string }
-  const requested = typeof msg.roomHint === 'string' ? msg.roomHint : null;
+  const requested =
+    typeof msg.roomHint ===
+    'string'
+      ? msg.roomHint
+      : null;
 
   const params = {
-    requested: typeof msg.roomHint === 'string' ? msg.roomHint : null,
-    ws: ws,
-    meta: meta,
-    room: null,
-    pairedDataChannel: null,
+    requested:
+      typeof msg.roomHint ===
+      'string'
+        ? msg.roomHint
+        : null,
+
+    ws,
+
+    meta,
+
+    room:
+      null,
+
+    pairedDataChannel:
+      null,
   };
 
-  // - 한 peer가 처음 진입 후 새로고침 - requested 있음
-  // - 두 peer 연결된 후 한 peer가 새로고침 - requested 있음
-  // - 두 peer 연결된 후 두 peer가 새로고침 난타 - requested 있다없다
-  // - 두 peer 연결된 후 한 peer가 나가고 남은 peer가 새로고침 - requested 있음
+  if (
+    params.requested &&
+    ROOMS[params.requested] &&
+    ROOMS[
+      params.requested
+    ].clients.size < 2
+  ) {
+    params.room =
+      ROOMS[
+        params.requested
+      ];
 
-  // 1) roomHint가 있고, 그 방이 현재 살아있다면 그 방으로
-  // 두 peer가 나가지 않은 상태에서 한 peer가 새로고침하면 새로고침 한 peer는 여기를 탐
-  if (params.requested && ROOMS[params.requested] && ROOMS[params.requested].clients.size < 2) {
-    // attachToRoom(ws, meta, ROOMS[requested]);
-    params.room = ROOMS[params.requested];
-    attachToRoom(params);
+    attachToRoom(
+      params,
+    );
+
     return;
   }
 
-  // 2) roomHint가 무덤에 있고(아직 TTL 안 지남) → 둘 다 나가서 ROOMS에서 방 삭제되었지만 → 방 부활
-  if (params.requested && TOMBSTONES.has(params.requested)) {
-    // 부활
-    TOMBSTONES.delete(params.requested);
-    // const revivedRoom = createRoomWithId(params.requested);
-    // attachToRoom(ws, meta, revivedRoom, true);
-    params.room = createRoomWithId(params.requested);
-    params.pairedDataChannel = true;
-    attachToRoom(params);
+  if (
+    params.requested &&
+    TOMBSTONES.has(
+      params.requested,
+    )
+  ) {
+    TOMBSTONES.delete(
+      params.requested,
+    );
+
+    params.room =
+      createRoomWithId(
+        params.requested,
+      );
+
+    params.pairedDataChannel =
+      true;
+
+    attachToRoom(
+      params,
+    );
+
     return;
   }
 
-  // 3) roomHint가 없거나, 사용할 수 없다면 "일반 매칭"
-  // let room = findWaitingRoom();
-  // if (!room) room = createRoom();
-  // attachToRoom(ws, meta, room);
   await handleFreshJoin(
     ws,
     meta,
@@ -636,7 +934,8 @@ async function handleFreshJoin(
 
   for (
     let attempt = 0;
-    attempt < MAX_MATCH_ATTEMPTS;
+    attempt <
+    MAX_MATCH_ATTEMPTS;
     attempt += 1
   ) {
     let result;
@@ -657,7 +956,8 @@ async function handleFreshJoin(
       );
 
       if (
-        ws.readyState === ws.OPEN
+        ws.readyState ===
+        ws.OPEN
       ) {
         ws.close(
           1011,
@@ -670,7 +970,8 @@ async function handleFreshJoin(
 
     if (
       shuttingDown ||
-      ws.readyState !== ws.OPEN
+      ws.readyState !==
+      ws.OPEN
     ) {
       if (
         result.status ===
@@ -825,7 +1126,8 @@ async function handleFreshJoin(
 
     if (
       shuttingDown ||
-      ws.readyState !== ws.OPEN
+      ws.readyState !==
+      ws.OPEN
     ) {
       return;
     }
@@ -899,7 +1201,8 @@ async function handleFreshJoin(
   }
 
   if (
-    ws.readyState === ws.OPEN
+    ws.readyState ===
+    ws.OPEN
   ) {
     ws.close(
       1011,
@@ -938,7 +1241,8 @@ async function registerPeerIdentity(
 
     if (
       shuttingDown ||
-      ws.readyState !== ws.OPEN
+      ws.readyState !==
+      ws.OPEN
     ) {
       try {
         await peerDirectory.unregister(
@@ -1045,7 +1349,8 @@ function cbConnection(ws, req) {
       }
 
       if (
-        msg?.type === 'join'
+        msg?.type ===
+        'join'
       ) {
         if (joinStarted) {
           return;
@@ -1060,7 +1365,8 @@ function cbConnection(ws, req) {
         if (
           !meta ||
           shuttingDown ||
-          ws.readyState !== ws.OPEN
+          ws.readyState !==
+          ws.OPEN
         ) {
           return;
         }
@@ -1078,7 +1384,8 @@ function cbConnection(ws, req) {
           );
 
           if (
-            ws.readyState === ws.OPEN
+            ws.readyState ===
+            ws.OPEN
           ) {
             ws.close(
               1011,
@@ -1100,7 +1407,8 @@ function cbConnection(ws, req) {
       }
 
       if (
-        msg?.type === 'signal' &&
+        msg?.type ===
+          'signal' &&
         msg?.to
       ) {
         let roomId;
@@ -1125,7 +1433,8 @@ function cbConnection(ws, req) {
         }
 
         if (
-          meta.roomId !== roomId
+          meta.roomId !==
+          roomId
         ) {
           console.error(
             `[signal] local room mismatch for peer ${meta.peerId}`,
@@ -1180,7 +1489,9 @@ function cbConnection(ws, req) {
         msg?.initRole
       ) {
         const room =
-          ROOMS[meta.roomId];
+          ROOMS[
+            meta.roomId
+          ];
 
         if (!room) {
           return;
@@ -1192,7 +1503,7 @@ function cbConnection(ws, req) {
           );
 
         if (localPeer) {
-          const keypairCode =
+          const transformedKeypair =
             transformRoomId(
               room.keypair,
             );
@@ -1200,20 +1511,20 @@ function cbConnection(ws, req) {
           const keypair = {
             public:
               randomPublicKey(
-                keypairCode,
+                transformedKeypair,
               ),
 
             private: {
               impolite:
                 randomPrivateKeyImpolite(
-                  keypairCode,
+                  transformedKeypair,
                 ).slice(
                   -10,
                 ),
 
               polite:
                 randomPrivateKeyPolite(
-                  keypairCode,
+                  transformedKeypair,
                 ).slice(
                   -10,
                 ),
@@ -1275,11 +1586,14 @@ function cbConnection(ws, req) {
       } = meta;
 
       const room =
-        ROOMS[roomId];
+        ROOMS[
+          roomId
+        ];
 
       if (room) {
         if (
-          room.clients.size === 2
+          room.clients.size ===
+          2
         ) {
           room.clients.delete(
             peerId,
@@ -1292,6 +1606,7 @@ function cbConnection(ws, req) {
                 'partner-left',
 
               roomId,
+
               peerId,
             },
           );
@@ -1299,7 +1614,8 @@ function cbConnection(ws, req) {
           room.lockAfterLeave =
             true;
         } else if (
-          room.clients.size === 1
+          room.clients.size ===
+          1
         ) {
           if (room.paired) {
             room.lockAfterLeave =
@@ -1320,6 +1636,20 @@ function cbConnection(ws, req) {
           ];
         }
       }
+
+      /*
+       * Redis 기반 신규 room인 경우:
+       *
+       * 실제 room/peer-room은 지금 삭제하지 않고
+       * resumeSessionTtlMs만큼 grace를 둔다.
+       *
+       * waiting peer나 legacy room이면
+       * scheduleDisconnect()가 null을 반환하므로
+       * Redis room cleanup에는 영향을 주지 않는다.
+       */
+      void schedulePeerDisconnect(
+        peerId,
+      );
 
       localPeers.remove(
         ws,
@@ -1349,7 +1679,10 @@ function cbConnection(ws, req) {
   );
 }
 
-wss.on('connection', cbConnection);
+wss.on(
+  'connection',
+  cbConnection,
+);
 
 function listenHttpServer() {
   return new Promise(
@@ -1360,7 +1693,9 @@ function listenHttpServer() {
           onListening,
         );
 
-        reject(error);
+        reject(
+          error,
+        );
       }
 
       function onListening() {
@@ -1411,6 +1746,8 @@ async function startServer() {
   );
 
   startPresenceRefresh();
+
+  startRoomCleanupSweep();
 
   resumeClaimManager.start();
 }
@@ -1513,7 +1850,9 @@ async function closeWebSocketServer() {
 }
 
 async function closeHttpServer() {
-  if (!server.listening) {
+  if (
+    !server.listening
+  ) {
     return;
   }
 
@@ -1535,13 +1874,16 @@ async function shutdown(
     return;
   }
 
-  shuttingDown = true;
+  shuttingDown =
+    true;
 
   console.log(
     `[shutdown] ${signal}`,
   );
 
   stopPresenceRefresh();
+
+  stopRoomCleanupSweep();
 
   resumeClaimManager.stop();
 
@@ -1593,6 +1935,8 @@ void startServer().catch(
     );
 
     stopPresenceRefresh();
+
+    stopRoomCleanupSweep();
 
     resumeClaimManager.stop();
 

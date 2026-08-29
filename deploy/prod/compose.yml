@@ -1,0 +1,89 @@
+services:
+  redis:
+    image: redis:7.4.11-bookworm
+    container_name: battletwo-signaling-prod-redis
+    command:
+      - redis-server
+      - --appendonly
+      - "yes"
+      - --appendfsync
+      - everysec
+    volumes:
+      - redis-data:/data
+    networks:
+      - signaling-prod
+    restart: unless-stopped
+    healthcheck:
+      test:
+        - CMD
+        - redis-cli
+        - ping
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+
+  signaling-a:
+    image: battletwo-signaling:b62a53e
+    container_name: battletwo-signaling-prod-a
+    environment:
+      REDIS_URL: redis://redis:6379
+      REDIS_KEY_PREFIX: battletwo:prod:signaling
+      RTC_HOST: 0.0.0.0
+      RTC_PORT: "5000"
+    depends_on:
+      redis:
+        condition: service_healthy
+    networks:
+      - signaling-prod
+    restart: unless-stopped
+    stop_grace_period: 15s
+
+  signaling-b:
+    image: battletwo-signaling:b62a53e
+    container_name: battletwo-signaling-prod-b
+    environment:
+      REDIS_URL: redis://redis:6379
+      REDIS_KEY_PREFIX: battletwo:prod:signaling
+      RTC_HOST: 0.0.0.0
+      RTC_PORT: "5000"
+    depends_on:
+      redis:
+        condition: service_healthy
+    networks:
+      - signaling-prod
+    restart: unless-stopped
+    stop_grace_period: 15s
+
+  lb:
+    image: nginx:alpine
+    container_name: battletwo-signaling-prod-lb
+    ports:
+      - "8083:80"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      signaling-a:
+        condition: service_healthy
+      signaling-b:
+        condition: service_healthy
+    networks:
+      - signaling-prod
+    restart: unless-stopped
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - wget -q -O /dev/null http://127.0.0.1/healthz || exit 1
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+
+networks:
+  signaling-prod:
+    name: battletwo-signaling-prod-net
+    driver: bridge
+
+volumes:
+  redis-data:
+    name: battletwo-signaling-prod-redis-data

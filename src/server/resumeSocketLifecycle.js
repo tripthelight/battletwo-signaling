@@ -281,13 +281,43 @@ export function createResumeSocketLifecycle({
    *
    * 가장 중요한 규칙:
    *
-   * resume claim release는 반드시 마지막이다.
+   * 1. room cleanup 예약이 필요한 경우에는
+   *    반드시 그 예약이 먼저 성공해야 한다.
+   *
+   * 2. cleanup 예약 자체가 실패하면 fail-closed한다.
+   *    local identity / presence / resume claim을
+   *    그대로 유지하여 상위 계층이 같은 cleanup을
+   *    안전하게 다시 시도할 수 있게 한다.
+   *
+   * 3. 예약이 성공했거나 예약할 room이 없는 것이
+   *    정상적으로 확인된 이후에만 identity cleanup을
+   *    진행한다.
+   *
+   * 4. resume claim release는 반드시 마지막이다.
    */
   async function cleanupActivatedIdentity({
     connection,
     peerId,
     scheduleRoomCleanup,
   }) {
+    /*
+     * 이 단계는 아래 runStep()으로 감싸지 않는다.
+     *
+     * scheduleDisconnect()가 throw하면
+     * 그 즉시 cleanup 전체를 중단해야 한다.
+     *
+     * 그렇지 않고 local/presence/claim을 먼저 제거하면
+     * Redis room cleanup 예약이 없는 orphan room을
+     * 만들 수 있기 때문이다.
+     */
+    if (
+      scheduleRoomCleanup
+    ) {
+      await scheduleDisconnect(
+        peerId,
+      );
+    }
+
     let firstError =
       null;
 
@@ -305,17 +335,6 @@ export function createResumeSocketLifecycle({
             error;
         }
       }
-    }
-
-    if (
-      scheduleRoomCleanup
-    ) {
-      await runStep(
-        () =>
-          scheduleDisconnect(
-            peerId,
-          ),
-      );
     }
 
     await runStep(

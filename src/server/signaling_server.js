@@ -4,6 +4,9 @@ import { randomUUID } from 'crypto';
 import { WebSocketServer } from 'ws';
 
 import { config } from './config.js';
+import {
+  createDisconnectScheduler,
+} from './disconnectScheduler.js';
 import { MAKE_STORAGE } from './functions/encryption/makeStorage.js';
 import {
   createInstanceRelay,
@@ -25,8 +28,14 @@ import {
   createResumeConnectionManager,
 } from './resumeConnection.js';
 import {
+  createResumeJoinManager,
+} from './resumeJoin.js';
+import {
   createResumeSessionStore,
 } from './resumeSession.js';
+import {
+  createResumeSocketLifecycle,
+} from './resumeSocketLifecycle.js';
 import { redis } from './redis.js';
 import { localPeers } from './state/localPeers.js';
 
@@ -99,6 +108,17 @@ const roomMembership =
       config.redisKeyPrefix,
   });
 
+const disconnectScheduler =
+  createDisconnectScheduler({
+    roomMembership,
+
+    instanceId:
+      redis.instanceId,
+
+    graceMs:
+      config.resumeSessionTtlMs,
+  });
+
 const resumeSessionStore =
   createResumeSessionStore({
     command:
@@ -132,6 +152,14 @@ const resumeConnectionManager =
       resumeClaimManager,
   });
 
+const resumeJoinManager =
+  createResumeJoinManager({
+    connectionManager:
+      resumeConnectionManager,
+
+    roomMembership,
+  });
+
 const INTERNAL_PAIR_ASSIGNMENT =
   '__internal-pair-assignment';
 
@@ -141,7 +169,30 @@ const ROOM_CLEANUP_SWEEP_MS =
 const ROOM_CLEANUP_BATCH_SIZE =
   100;
 
+const CONNECTION_CLEANUP_RETRY_MS =
+  1_000;
+
 const activePeerIds =
+  new Set();
+
+const connectionCleanupTasks =
+  new Set();
+
+/*
+ * peerId -> 최초 disconnect 시점에 계산한 dueAtMs
+ *
+ * Redis 장애 때문에 outer cleanup retry가 발생해도
+ * grace deadline이 뒤로 밀리지 않도록 유지한다.
+ */
+const disconnectDeadlines =
+  new Map();
+
+/*
+ * legacy ROOMS 기반 연결은 Redis room membership을
+ * 사용하지 않으므로 durable Redis cleanup 예약이
+ * 필요하지 않다.
+ */
+const legacyDisconnectPeerIds =
   new Set();
 
 let presenceRefreshRunning =
@@ -158,6 +209,32 @@ let roomCleanupTimer =
 
 let shuttingDown =
   false;
+
+const resumeSocketLifecycle =
+  createResumeSocketLifecycle({
+    resumeJoinManager,
+
+    localPeers,
+
+    peerDirectory,
+
+    activePeerIds,
+
+    scheduleDisconnect:
+      schedulePeerDisconnect,
+
+    cancelWaiting:
+      cancelPeerWaiting,
+
+    isConnectionOpen:
+      (ws) =>
+        ws.readyState ===
+        ws.OPEN,
+
+    isShuttingDown:
+      () =>
+        shuttingDown,
+  });
 
 async function refreshOnePeer(
   peerId,
@@ -389,7 +466,8 @@ function startRoomCleanupSweep() {
 
 function stopRoomCleanupSweep() {
   if (
-    roomCleanupTimer === null
+    roomCleanupTimer ===
+    null
   ) {
     return;
   }
@@ -402,50 +480,143 @@ function stopRoomCleanupSweep() {
     null;
 }
 
+function makeDisconnectDueAtMs() {
+  const dueAtMs =
+    Date.now() +
+    config.resumeSessionTtlMs;
+
+  if (
+    !Number.isSafeInteger(
+      dueAtMs,
+    ) ||
+    dueAtMs < 0
+  ) {
+    throw new Error(
+      'failed to calculate disconnect cleanup deadline',
+    );
+  }
+
+  return dueAtMs;
+}
+
 async function schedulePeerDisconnect(
   peerId,
 ) {
-  try {
-    const roomId =
-      await roomMembership.scheduleDisconnect({
-        peerId,
+  /*
+   * legacy ROOMS 연결에는 Redis room state가 없다.
+   * Redis 장애 때문에 legacy socket cleanup까지
+   * 불필요하게 막히지 않도록 즉시 정상 종료한다.
+   */
+  if (
+    legacyDisconnectPeerIds.has(
+      peerId,
+    )
+  ) {
+    return Object.freeze({
+      status:
+        'not-member',
 
-        dueAtMs:
-          Date.now() +
-          config.resumeSessionTtlMs,
-      });
+      peerId,
 
-    if (!roomId) {
-      return;
-    }
+      legacy:
+        true,
+    });
+  }
 
-    console.log(
-      `[room-cleanup] scheduled room ${roomId} for disconnected peer ${peerId}`,
+  let dueAtMs =
+    disconnectDeadlines.get(
+      peerId,
     );
-  } catch (error) {
-    console.error(
-      `[room-cleanup] failed to schedule disconnected peer ${peerId}:`,
-      error,
+
+  if (
+    dueAtMs ===
+    undefined
+  ) {
+    dueAtMs =
+      makeDisconnectDueAtMs();
+
+    disconnectDeadlines.set(
+      peerId,
+      dueAtMs,
     );
   }
+
+  const result =
+    await disconnectScheduler.schedule(
+      peerId,
+      {
+        dueAtMs,
+      },
+    );
+
+  if (
+    result.status ===
+    'scheduled'
+  ) {
+    console.log(
+      `[room-cleanup] scheduled room ${result.roomId} for disconnected peer ${peerId}`,
+    );
+
+    return result;
+  }
+
+  if (
+    result.status ===
+    'owner-changed'
+  ) {
+    console.log(
+      `[room-cleanup] skipped stale disconnect for peer ${peerId}; current owner is ${result.owner}`,
+    );
+
+    return result;
+  }
+
+  if (
+    result.status ===
+    'not-member'
+  ) {
+    return result;
+  }
+
+  throw new Error(
+    `unexpected disconnect scheduler result: ${result.status}`,
+  );
+}
+
+function waitForConnectionCleanupRetry() {
+  return new Promise(
+    (resolve) => {
+      setTimeout(
+        resolve,
+        CONNECTION_CLEANUP_RETRY_MS,
+      );
+    },
+  );
 }
 
 function makeResumeClaimLostHandler(
   ws,
-  peerId,
+  peerId = null,
 ) {
   return async ({
     reason,
     error,
+    peerId:
+      eventPeerId,
   }) => {
+    const resolvedPeerId =
+      peerId ??
+      eventPeerId ??
+      'unknown';
+
     if (error) {
       console.error(
-        `[resume] claim lost for peer ${peerId}: ${reason}`,
+        `[resume] claim lost for peer ${resolvedPeerId}: ${reason}`,
         error,
       );
     } else {
       console.error(
-        `[resume] claim lost for peer ${peerId}: ${reason}`,
+        `[resume] claim lost for peer ${resolvedPeerId}: ${reason}`,
       );
     }
 
@@ -599,20 +770,204 @@ async function issueResumeToken({
   return result.token;
 }
 
-async function releaseResumeConnection(
+function rejectResume(
   ws,
-  peerId,
+  reason,
+  closeCode = 1008,
 ) {
-  try {
-    await resumeConnectionManager.release(
-      ws,
-    );
-  } catch (error) {
-    console.error(
-      `[resume] failed to release claim for peer ${peerId}:`,
-      error,
+  safeSend(
+    ws,
+    {
+      type:
+        'resume-rejected',
+
+      reason,
+    },
+  );
+
+  if (
+    ws.readyState ===
+    ws.OPEN
+  ) {
+    ws.close(
+      closeCode,
+      'resume rejected',
     );
   }
+}
+
+async function handleResumeJoin(
+  ws,
+  resumeToken,
+) {
+  let result;
+
+  try {
+    result =
+      await resumeSocketLifecycle.resume({
+        connection:
+          ws,
+
+        token:
+          resumeToken,
+
+        onLost:
+          makeResumeClaimLostHandler(
+            ws,
+          ),
+      });
+  } catch (error) {
+    console.error(
+      '[resume] failed to resume connection:',
+      error,
+    );
+
+    if (
+      ws.readyState ===
+      ws.OPEN
+    ) {
+      ws.close(
+        1011,
+        'resume unavailable',
+      );
+    }
+
+    return;
+  }
+
+  if (
+    result.status ===
+    'aborted'
+  ) {
+    return;
+  }
+
+  if (
+    result.status ===
+      'claimed' ||
+    result.status ===
+      'peer-active'
+  ) {
+    rejectResume(
+      ws,
+      'busy',
+      1013,
+    );
+
+    return;
+  }
+
+  if (
+    result.status ===
+      'invalid-token' ||
+    result.status ===
+      'missing' ||
+    result.status ===
+      'invalid' ||
+    result.status ===
+      'invalid-state'
+  ) {
+    rejectResume(
+      ws,
+      result.status ===
+        'invalid'
+        ? 'invalid-state'
+        : result.status,
+    );
+
+    return;
+  }
+
+  if (
+    result.status ===
+    'local-room-failed'
+  ) {
+    rejectResume(
+      ws,
+      'server-state',
+      1011,
+    );
+
+    return;
+  }
+
+  if (
+    result.status !==
+    'restored'
+  ) {
+    console.error(
+      `[resume] unexpected resume result: ${result.status}`,
+    );
+
+    if (
+      ws.readyState ===
+      ws.OPEN
+    ) {
+      ws.close(
+        1011,
+        'invalid resume result',
+      );
+    }
+
+    return;
+  }
+
+  safeSend(
+    ws,
+    {
+      type:
+        'room-assigned',
+
+      roomId:
+        result.roomId,
+
+      peerId:
+        result.peerId,
+
+      role:
+        result.role,
+
+      pairedDataChannel:
+        null,
+
+      resumeToken:
+        result.token,
+    },
+  );
+
+  safeSend(
+    ws,
+    {
+      type:
+        'paired',
+
+      roomId:
+        result.roomId,
+
+      you: {
+        peerId:
+          result.peerId,
+
+        role:
+          result.role,
+      },
+
+      partner: {
+        peerId:
+          result.partnerPeerId,
+
+        role:
+          result.role ===
+          'impolite'
+            ? 'polite'
+            : 'impolite',
+      },
+    },
+  );
+
+  console.log(
+    `[resume] restored peer ${result.peerId} to room ${result.roomId}`,
+  );
 }
 
 // ———————————————————————————————————————————————————
@@ -1544,12 +1899,257 @@ async function registerPeerIdentity(
   }
 }
 
+function cleanupLegacyRoom(
+  meta,
+) {
+  if (!meta) {
+    return;
+  }
+
+  const {
+    peerId,
+    roomId,
+  } = meta;
+
+  const room =
+    ROOMS[
+      roomId
+    ];
+
+  if (!room) {
+    return;
+  }
+
+  if (
+    room.clients.size ===
+    2
+  ) {
+    room.clients.delete(
+      peerId,
+    );
+
+    broadcast(
+      room,
+      {
+        type:
+          'partner-left',
+
+        roomId,
+
+        peerId,
+      },
+    );
+
+    room.lockAfterLeave =
+      true;
+
+    return;
+  }
+
+  if (
+    room.clients.size ===
+    1
+  ) {
+    if (room.paired) {
+      room.lockAfterLeave =
+        true;
+
+      TOMBSTONES.set(
+        roomId,
+        roomId,
+      );
+    }
+
+    room.clients.delete(
+      peerId,
+    );
+
+    delete ROOMS[
+      roomId
+    ];
+  }
+}
+
+function isLegacyConnection(
+  meta,
+) {
+  if (
+    !meta ||
+    !meta.roomId
+  ) {
+    return false;
+  }
+
+  return Boolean(
+    ROOMS[
+      meta.roomId
+    ],
+  );
+}
+
+async function cleanupConnection(
+  ws,
+  joinTask,
+) {
+  /*
+   * resume/fresh join이 아직 진행 중인 상태에서
+   * close cleanup이 먼저 claim/presence를 건드리면
+   * 동일 peerId의 상태가 뒤엉킬 수 있다.
+   *
+   * 반드시 해당 connection의 join 작업부터 끝낸다.
+   */
+  if (joinTask) {
+    await Promise.allSettled([
+      joinTask,
+    ]);
+  }
+
+  const initialMeta =
+    localPeers.getMeta(
+      ws,
+    );
+
+  const initialPeerId =
+    initialMeta?.peerId ??
+    null;
+
+  const legacyConnection =
+    isLegacyConnection(
+      initialMeta,
+    );
+
+  /*
+   * cleanupLegacyRoom()이 ROOMS entry를 삭제할 수 있으므로
+   * 그 전에 legacy 여부를 저장해 둔다.
+   */
+  if (
+    legacyConnection &&
+    initialPeerId
+  ) {
+    legacyDisconnectPeerIds.add(
+      initialPeerId,
+    );
+  }
+
+  /*
+   * 기존 legacy ROOMS cleanup은 정확히 한 번만 실행한다.
+   */
+  cleanupLegacyRoom(
+    initialMeta,
+  );
+
+  let attempt =
+    0;
+
+  try {
+    while (true) {
+      attempt +=
+        1;
+
+      try {
+        await resumeSocketLifecycle.cleanup(
+          ws,
+        );
+
+        return;
+      } catch (error) {
+        /*
+         * scheduleDisconnect() 실패는 fail-closed이므로
+         * local identity가 그대로 남는다.
+         *
+         * 반대로 durable schedule 이후 단계에서 오류가
+         * 발생했다면 local identity는 이미 제거되었을
+         * 가능성이 높고, 같은 cleanup 전체를 다시 실행하면
+         * 안 된다.
+         */
+        const remainingMeta =
+          localPeers.getMeta(
+            ws,
+          );
+
+        if (!remainingMeta) {
+          console.error(
+            '[connection] cleanup failed after local identity removal:',
+            error,
+          );
+
+          return;
+        }
+
+        console.error(
+          `[connection] durable cleanup attempt ${attempt} failed for peer ${remainingMeta.peerId}; retrying:`,
+          error,
+        );
+
+        await waitForConnectionCleanupRetry();
+      }
+    }
+  } finally {
+    if (
+      initialPeerId
+    ) {
+      legacyDisconnectPeerIds.delete(
+        initialPeerId,
+      );
+
+      disconnectDeadlines.delete(
+        initialPeerId,
+      );
+    }
+  }
+}
+
+function trackConnectionCleanup(
+  task,
+) {
+  connectionCleanupTasks.add(
+    task,
+  );
+
+  void task.then(
+    () => {
+      connectionCleanupTasks.delete(
+        task,
+      );
+    },
+    (error) => {
+      connectionCleanupTasks.delete(
+        task,
+      );
+
+      console.error(
+        '[connection] unhandled cleanup failure:',
+        error,
+      );
+    },
+  );
+}
+
+async function waitForConnectionCleanups() {
+  while (
+    connectionCleanupTasks.size >
+    0
+  ) {
+    await Promise.allSettled(
+      Array.from(
+        connectionCleanupTasks,
+      ),
+    );
+  }
+}
+
 function cbConnection(ws, req) {
   let joinStarted =
     false;
 
   let peerActivation =
     null;
+
+  let joinTask =
+    null;
+
+  let cleanupStarted =
+    false;
 
   function activateFreshPeer() {
     if (
@@ -1568,6 +2168,61 @@ function cbConnection(ws, req) {
       );
 
     return peerActivation;
+  }
+
+  async function runJoin(
+    msg,
+  ) {
+    const hasResumeToken =
+      Object.prototype
+        .hasOwnProperty.call(
+          msg,
+          'resumeToken',
+        );
+
+    if (hasResumeToken) {
+      await handleResumeJoin(
+        ws,
+        msg.resumeToken,
+      );
+
+      return;
+    }
+
+    const meta =
+      await activateFreshPeer();
+
+    if (
+      !meta ||
+      shuttingDown ||
+      ws.readyState !==
+      ws.OPEN
+    ) {
+      return;
+    }
+
+    try {
+      await handleJoin(
+        ws,
+        meta,
+        msg,
+      );
+    } catch (error) {
+      console.error(
+        `[join] failed for peer ${meta.peerId}:`,
+        error,
+      );
+
+      if (
+        ws.readyState ===
+        ws.OPEN
+      ) {
+        ws.close(
+          1011,
+          'join failed',
+        );
+      }
+    }
   }
 
   ws.on(
@@ -1595,40 +2250,12 @@ function cbConnection(ws, req) {
         joinStarted =
           true;
 
-        const meta =
-          await activateFreshPeer();
-
-        if (
-          !meta ||
-          shuttingDown ||
-          ws.readyState !==
-          ws.OPEN
-        ) {
-          return;
-        }
-
-        try {
-          await handleJoin(
-            ws,
-            meta,
+        joinTask =
+          runJoin(
             msg,
           );
-        } catch (error) {
-          console.error(
-            `[join] failed for peer ${meta.peerId}:`,
-            error,
-          );
 
-          if (
-            ws.readyState ===
-            ws.OPEN
-          ) {
-            ws.close(
-              1011,
-              'join failed',
-            );
-          }
-        }
+        await joinTask;
 
         return;
       }
@@ -1807,123 +2434,22 @@ function cbConnection(ws, req) {
   ws.on(
     'close',
     () => {
-      const meta =
-        localPeers.getMeta(
-          ws,
-        );
-
-      if (!meta) {
+      if (cleanupStarted) {
         return;
       }
 
-      const {
-        peerId,
-        roomId,
-      } = meta;
+      cleanupStarted =
+        true;
 
-      const room =
-        ROOMS[
-          roomId
-        ];
-
-      if (room) {
-        if (
-          room.clients.size ===
-          2
-        ) {
-          room.clients.delete(
-            peerId,
-          );
-
-          broadcast(
-            room,
-            {
-              type:
-                'partner-left',
-
-              roomId,
-
-              peerId,
-            },
-          );
-
-          room.lockAfterLeave =
-            true;
-        } else if (
-          room.clients.size ===
-          1
-        ) {
-          if (room.paired) {
-            room.lockAfterLeave =
-              true;
-
-            TOMBSTONES.set(
-              roomId,
-              roomId,
-            );
-          }
-
-          room.clients.delete(
-            peerId,
-          );
-
-          delete ROOMS[
-            roomId
-          ];
-        }
-      }
-
-      /*
-       * Resume session 자체는 삭제하지 않고
-       * 이 WebSocket connection이 소유한 claim만 해제한다.
-       *
-       * session은 resumeSessionTtlMs 동안 유지되어
-       * 다음 connection이 같은 resumeToken으로
-       * 다시 claim할 수 있다.
-       */
-      void releaseResumeConnection(
-        ws,
-        peerId,
-      );
-
-      /*
-       * Redis 기반 신규 room인 경우:
-       *
-       * 실제 room/peer-room은 지금 삭제하지 않고
-       * resumeSessionTtlMs만큼 grace를 둔다.
-       *
-       * waiting peer나 legacy room이면
-       * scheduleDisconnect()가 null을 반환하므로
-       * Redis room cleanup에는 영향을 주지 않는다.
-       */
-      void schedulePeerDisconnect(
-        peerId,
-      );
-
-      localPeers.remove(
-        ws,
-      );
-
-      activePeerIds.delete(
-        peerId,
-      );
-
-      void cancelPeerWaiting(
-        peerId,
-      );
-
-      void peerDirectory
-        .unregister(
-          peerId,
-        )
-        .catch(
-          (error) => {
-            console.error(
-              `[presence] failed to unregister peer ${peerId}:`,
-              error,
-            );
-          },
+      const cleanupTask =
+        cleanupConnection(
+          ws,
+          joinTask,
         );
+
+      trackConnectionCleanup(
+        cleanupTask,
+      );
     },
   );
 }
@@ -2096,6 +2622,19 @@ async function closeWebSocketServer() {
   }
 
   await closed;
+
+  /*
+   * 'close' event에서 시작된 Redis cleanup은 async이므로
+   * WebSocketServer가 닫힌 것만으로 끝난 것이 아니다.
+   *
+   * identity/presence/claim cleanup까지 모두 기다린다.
+   *
+   * durable room cleanup 예약이 Redis 장애로 실패하면
+   * cleanup task 자체가 retry 상태에 머무르므로
+   * graceful shutdown 역시 그 durable handoff가
+   * 성공하거나 stale owner로 판정될 때까지 기다린다.
+   */
+  await waitForConnectionCleanups();
 }
 
 async function closeHttpServer() {
@@ -2134,14 +2673,43 @@ async function shutdown(
 
   stopRoomCleanupSweep();
 
-  resumeClaimManager.stop();
+  /*
+   * 아직 resumeClaimManager.stop()을 호출하지 않는다.
+   *
+   * socket cleanup이 진행되는 동안 claim refresh가
+   * 성공할 수 있는 환경이라면 계속 lease를 유지한다.
+   *
+   * Redis refresh 자체가 실패하면 claim manager는
+   * 해당 claim을 lost 상태로 전환하지만,
+   * local identity는 durable cleanup이 완료될 때까지
+   * 그대로 보존되고 presence fencing이 stale instance의
+   * 늦은 cleanup을 차단한다.
+   */
 
   try {
     await cancelAllWaitingPeers();
 
+    /*
+     * 모든 socket을 닫고,
+     * 각 socket의 join 작업과 async durable cleanup까지
+     * 기다린다.
+     */
+    await closeWebSocketServer();
+
+    /*
+     * 정상적으로는 lifecycle cleanup이 모두 제거했으므로
+     * activePeerIds가 비어 있어야 한다.
+     *
+     * durable schedule 이후의 비핵심 cleanup 오류가
+     * 있었던 경우에만 fallback 역할을 한다.
+     */
     await unregisterAllPeers();
 
-    await closeWebSocketServer();
+    /*
+     * identity/presence cleanup barrier를 통과했으므로
+     * 이제 claim refresh timer를 중지한다.
+     */
+    resumeClaimManager.stop();
 
     await instanceRelay.stop();
 
@@ -2152,6 +2720,26 @@ async function shutdown(
       error,
     );
   } finally {
+    /*
+     * 예외 경로에서도 현재 등록된 cleanup task가
+     * 있다면 먼저 끝까지 기다린다.
+     */
+    try {
+      await waitForConnectionCleanups();
+    } catch (error) {
+      console.error(
+        '[shutdown] connection cleanup error:',
+        error,
+      );
+    }
+
+    resumeClaimManager.stop();
+
+    /*
+     * 정상 lifecycle에서 release되지 못하고
+     * claim-manager에 아직 남아 있는 claim의
+     * 최종 안전망.
+     */
     await resumeClaimManager.releaseAll();
 
     redis.disconnect();

@@ -1,3 +1,7 @@
+import {
+  makePeerKey,
+} from './peerDirectory.js';
+
 function isNonEmptyString(
   value,
   maxLength = 128,
@@ -51,6 +55,16 @@ function assertRole(
   ) {
     throw new TypeError(
       'role must be impolite or polite',
+    );
+  }
+}
+
+function assertPresenceOwner(
+  owner,
+) {
+  if (!isNonEmptyString(owner)) {
+    throw new TypeError(
+      'expectedPresenceOwner must be a non-empty string',
     );
   }
 }
@@ -120,6 +134,74 @@ function parseRestoreResult(
     roomId,
     role,
     partnerPeerId,
+  });
+}
+
+function parseFencedScheduleResult(
+  result,
+) {
+  if (
+    !Array.isArray(result) ||
+    result.length === 0
+  ) {
+    throw new Error(
+      'invalid fenced disconnect result',
+    );
+  }
+
+  const status =
+    result[0];
+
+  if (
+    status ===
+    'not-member'
+  ) {
+    return Object.freeze({
+      status:
+        'not-member',
+    });
+  }
+
+  if (
+    status ===
+    'owner-changed'
+  ) {
+    const owner =
+      result[1];
+
+    assertPresenceOwner(
+      owner,
+    );
+
+    return Object.freeze({
+      status:
+        'owner-changed',
+
+      owner,
+    });
+  }
+
+  if (
+    status !==
+    'scheduled'
+  ) {
+    throw new Error(
+      `unknown fenced disconnect status: ${status}`,
+    );
+  }
+
+  const roomId =
+    result[1];
+
+  assertRoomId(
+    roomId,
+  );
+
+  return Object.freeze({
+    status:
+      'scheduled',
+
+    roomId,
   });
 }
 
@@ -552,6 +634,11 @@ export function createRoomMembership({
     );
   }
 
+  /*
+   * 기존 비-fenced API.
+   *
+   * 기존 호출부와 테스트의 계약을 그대로 보존한다.
+   */
   async function scheduleDisconnect({
     peerId,
     dueAtMs,
@@ -634,6 +721,145 @@ export function createRoomMembership({
       typeof result === 'string'
         ? result
         : null
+    );
+  }
+
+  /*
+   * Cross-instance fencing이 적용된 disconnect 예약.
+   *
+   * expectedPresenceOwner는 이 disconnect를 수행하는
+   * signaling instance의 instanceId다.
+   *
+   * Redis Lua 안에서 peer presence owner와 room 상태를
+   * 한 번에 검사한 뒤 cleanup 예약을 기록한다.
+   *
+   * 중요:
+   *
+   * presence가 아예 없는 경우에는 예약을 허용한다.
+   *
+   * 이전 instance의 presence TTL이 먼저 만료된 뒤에도
+   * 아직 다른 instance가 peer를 인수하지 않았다면
+   * room cleanup은 반드시 예약돼야 하기 때문이다.
+   *
+   * 반대로 다른 instance가 이미 presence를 등록했다면
+   * 이전 instance의 늦은 cleanup 예약은 거부한다.
+   */
+  async function scheduleDisconnectFenced({
+    peerId,
+    dueAtMs,
+    expectedPresenceOwner,
+  }) {
+    assertPeerId(
+      peerId,
+    );
+
+    assertDueAtMs(
+      dueAtMs,
+    );
+
+    assertPresenceOwner(
+      expectedPresenceOwner,
+    );
+
+    const peerRoomKey =
+      makePeerRoomKey(
+        keyPrefix,
+        peerId,
+      );
+
+    const peerPresenceKey =
+      makePeerKey(
+        keyPrefix,
+        peerId,
+      );
+
+    const result =
+      await command.eval(
+        `
+          -- room-membership:schedule-disconnect-fenced
+
+          local currentPresenceOwner =
+            redis.call(
+              'GET',
+              KEYS[4]
+            )
+
+          if
+            currentPresenceOwner and
+            currentPresenceOwner ~= ARGV[4]
+          then
+            return {
+              'owner-changed',
+              currentPresenceOwner
+            }
+          end
+
+          local roomId =
+            redis.call(
+              'GET',
+              KEYS[1]
+            )
+
+          if not roomId then
+            return {
+              'not-member'
+            }
+          end
+
+          local roomKey =
+            ARGV[1] ..
+            ':room:' ..
+            roomId
+
+          local members =
+            redis.call(
+              'HMGET',
+              roomKey,
+              'impolite',
+              'polite'
+            )
+
+          if
+            members[1] ~= ARGV[2] and
+            members[2] ~= ARGV[2]
+          then
+            return {
+              'not-member'
+            }
+          end
+
+          redis.call(
+            'HSET',
+            KEYS[2],
+            ARGV[2],
+            roomId
+          )
+
+          redis.call(
+            'ZADD',
+            KEYS[3],
+            ARGV[3],
+            ARGV[2]
+          )
+
+          return {
+            'scheduled',
+            roomId
+          }
+        `,
+        4,
+        peerRoomKey,
+        cleanupRoomKey,
+        cleanupKey,
+        peerPresenceKey,
+        keyPrefix,
+        peerId,
+        dueAtMs,
+        expectedPresenceOwner,
+      );
+
+    return parseFencedScheduleResult(
+      result,
     );
   }
 
@@ -887,6 +1113,7 @@ export function createRoomMembership({
     arePartners,
     restore,
     scheduleDisconnect,
+    scheduleDisconnectFenced,
     cancelDisconnect,
     cleanupDue,
   });

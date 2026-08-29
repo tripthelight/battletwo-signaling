@@ -5,6 +5,7 @@ import {
 import {
   makePeerRoomKey,
   makeRoomKey,
+  makeRoomWatchKey,
 } from './roomMembership.js';
 
 function isNonEmptyString(
@@ -196,6 +197,11 @@ export function createMatchmaker({
 
   const waitingKey =
     makeWaitingKey(
+      keyPrefix,
+    );
+
+  const roomWatchKey =
+    makeRoomWatchKey(
       keyPrefix,
     );
 
@@ -445,6 +451,13 @@ export function createMatchmaker({
                 proposedRoomId
               )
 
+              redis.call(
+                'ZADD',
+                KEYS[5],
+                nowMs,
+                proposedRoomId
+              )
+
               return {
                 'paired',
                 proposedRoomId,
@@ -453,11 +466,12 @@ export function createMatchmaker({
             end
           end
         `,
-        4,
+        5,
         waitingKey,
         peerRoomKey,
         peerPresenceKey,
         proposedRoomKey,
+        roomWatchKey,
         keyPrefix,
         peerId,
         proposedRoomId,
@@ -585,13 +599,20 @@ export function createMatchmaker({
             ARGV[2]
           )
 
+          redis.call(
+            'ZREM',
+            KEYS[5],
+            ARGV[3]
+          )
+
           return 1
         `,
-        4,
+        5,
         roomKey,
         peerRoomKey,
         partnerRoomKey,
         waitingKey,
+        roomWatchKey,
         peerId,
         partnerPeerId,
         roomId,

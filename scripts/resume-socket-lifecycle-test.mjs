@@ -717,10 +717,10 @@ await test(
       [
         'claim',
         'presence-register',
-        'local-remove',
         'active-delete',
         'cancel-waiting',
         'presence-unregister',
+        'local-remove',
         'release',
       ],
     );
@@ -819,10 +819,10 @@ await test(
         'active-add',
         'restore',
         'schedule',
-        'local-remove',
         'active-delete',
         'cancel-waiting',
         'presence-unregister',
+        'local-remove',
         'release',
       ],
     );
@@ -879,10 +879,10 @@ await test(
         'local-register',
         'active-add',
         'restore',
-        'local-remove',
         'active-delete',
         'cancel-waiting',
         'presence-unregister',
+        'local-remove',
         'release',
       ],
     );
@@ -935,10 +935,10 @@ await test(
         'restore',
         'local-room',
         'schedule',
-        'local-remove',
         'active-delete',
         'cancel-waiting',
         'presence-unregister',
+        'local-remove',
         'release',
       ],
     );
@@ -977,10 +977,10 @@ await test(
         'active-add',
         'restore',
         'schedule',
-        'local-remove',
         'active-delete',
         'cancel-waiting',
         'presence-unregister',
+        'local-remove',
         'release',
       ],
     );
@@ -1033,10 +1033,10 @@ await test(
       fixture.events,
       [
         'schedule',
-        'local-remove',
         'active-delete',
         'cancel-waiting',
         'presence-unregister',
+        'local-remove',
         'release',
       ],
     );

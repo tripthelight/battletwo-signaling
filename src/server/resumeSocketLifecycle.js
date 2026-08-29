@@ -281,13 +281,46 @@ export function createResumeSocketLifecycle({
    *
    * 가장 중요한 규칙:
    *
-   * resume claim release는 반드시 마지막이다.
+   * 1. room cleanup 예약이 필요한 경우에는
+   *    반드시 그 예약이 먼저 성공해야 한다.
+   *
+   * 2. cleanup 예약 자체가 실패하면 fail-closed한다.
+   *    local identity / presence / resume claim을
+   *    그대로 유지하여 상위 계층이 같은 cleanup을
+   *    안전하게 다시 시도할 수 있게 한다.
+   *
+   * 3. 예약이 성공했거나 예약할 room이 없는 것이
+   *    정상적으로 확인된 이후에만 identity cleanup을
+   *    진행한다.
+   *
+   * 4. resume claim release는 반드시 마지막이다.
    */
   async function cleanupActivatedIdentity({
     connection,
     peerId,
     scheduleRoomCleanup,
   }) {
+    /*
+     * 이 단계는 아래 runStep()으로 감싸지 않는다.
+     *
+     * scheduleDisconnect()가 throw하면
+     * 그 즉시 cleanup 전체를 중단해야 한다.
+     *
+     * 그렇지 않고 local/presence/claim을 먼저 제거하면
+     * Redis room cleanup 예약이 없는 orphan room을
+     * 만들 수 있기 때문이다.
+     */
+    if (
+      scheduleRoomCleanup
+    ) {
+      await scheduleDisconnect(
+        peerId,
+        {
+          connection,
+        },
+      );
+    }
+
     let firstError =
       null;
 
@@ -307,25 +340,15 @@ export function createResumeSocketLifecycle({
       }
     }
 
-    if (
-      scheduleRoomCleanup
-    ) {
-      await runStep(
-        () =>
-          scheduleDisconnect(
-            peerId,
-          ),
-      );
-    }
-
-    await runStep(
-      async () => {
-        localPeers.remove(
-          connection,
-        );
-      },
-    );
-
+    /*
+     * presence refresh를 먼저 중지한다.
+     *
+     * local peer identity는 아직 제거하지 않는다.
+     * 같은 signaling instance에서 old resume claim이
+     * 이미 소실된 상태로 새 resume가 겹치더라도,
+     * stale old cleanup이 Redis presence 정리를 마칠 때까지
+     * local duplicate guard가 새 identity activation을 막아야 한다.
+     */
     await runStep(
       async () => {
         activePeerIds.delete(
@@ -346,6 +369,22 @@ export function createResumeSocketLifecycle({
         peerDirectory.unregister(
           peerId,
         ),
+    );
+
+    /*
+     * Redis presence cleanup 이후에만 local identity를 제거한다.
+     *
+     * same-instance resume는 instanceId가 동일하므로
+     * old cleanup의 owner-checked unregister만으로는
+     * old/new socket generation을 구분할 수 없다.
+     * 따라서 localPeers가 old generation의 마지막 fence 역할을 한다.
+     */
+    await runStep(
+      async () => {
+        localPeers.remove(
+          connection,
+        );
+      },
     );
 
     /*

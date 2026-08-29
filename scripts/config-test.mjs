@@ -37,6 +37,8 @@ test(
         rtcPort: 5000,
 
         roomTtlMs: 15_000,
+        shutdownCleanupTimeoutMs:
+          10_000,
         maxPayloadBytes:
           64 * 1024,
 
@@ -82,6 +84,9 @@ test(
         ROOM_TTL_MS:
           '30000',
 
+        SHUTDOWN_CLEANUP_TIMEOUT_MS:
+          '12000',
+
         WS_MAX_PAYLOAD_BYTES:
           '131072',
 
@@ -123,6 +128,11 @@ test(
     assert.equal(
       config.roomTtlMs,
       30_000,
+    );
+
+    assert.equal(
+      config.shutdownCleanupTimeoutMs,
+      12_000,
     );
 
     assert.equal(
@@ -260,6 +270,21 @@ test(
         });
       },
       /ROOM_TTL_MS/,
+    );
+  },
+);
+
+test(
+  'reject invalid shutdown cleanup timeout',
+  () => {
+    assert.throws(
+      () => {
+        loadConfig({
+          SHUTDOWN_CLEANUP_TIMEOUT_MS:
+            '500',
+        });
+      },
+      /SHUTDOWN_CLEANUP_TIMEOUT_MS/,
     );
   },
 );

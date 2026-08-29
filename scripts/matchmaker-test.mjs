@@ -41,6 +41,9 @@ function createFakeCommand() {
 
     rooms:
       new Map(),
+
+    roomWatch:
+      new Map(),
   };
 
   return {
@@ -79,6 +82,7 @@ function createFakeCommand() {
       peerRoomKey,
       peerPresenceKey,
       proposedRoomKey,
+      roomWatchKey,
       keyPrefix,
       peerId,
       proposedRoomId,
@@ -89,14 +93,24 @@ function createFakeCommand() {
           '-- matchmaker:rollback-pair',
         )
       ) {
+        assert.equal(
+          numberOfKeys,
+          5,
+        );
+
+        assert.match(
+          arguments[6],
+          /:room-watch$/,
+        );
+
         const roomId =
-          arguments[8];
+          arguments[9];
 
         const peerId =
-          arguments[6];
+          arguments[7];
 
         const partnerPeerId =
-          arguments[7];
+          arguments[8];
 
         const room =
           state.rooms.get(
@@ -144,6 +158,10 @@ function createFakeCommand() {
           partnerPeerId,
         );
 
+        state.roomWatch.delete(
+          roomId,
+        );
+
         state.waiting =
           state.waiting.filter(
             (waitingPeerId) =>
@@ -157,7 +175,7 @@ function createFakeCommand() {
 
       assert.equal(
         numberOfKeys,
-        4,
+        5,
       );
 
       assert.match(
@@ -188,6 +206,11 @@ function createFakeCommand() {
       assert.equal(
         proposedRoomKey,
         `${keyPrefix}:room:${proposedRoomId}`,
+      );
+
+      assert.equal(
+        roomWatchKey,
+        `${keyPrefix}:room-watch`,
       );
 
       assert.equal(
@@ -322,6 +345,11 @@ function createFakeCommand() {
         state.peerRooms.set(
           peerId,
           proposedRoomId,
+        );
+
+        state.roomWatch.set(
+          proposedRoomId,
+          Number(nowMs),
         );
 
         return [
@@ -506,6 +534,13 @@ await test(
     assert.deepEqual(
       command.state.waiting,
       [],
+    );
+
+    assert.equal(
+      command.state.roomWatch.get(
+        'room-1',
+      ),
+      1001,
     );
   },
 );
@@ -933,6 +968,13 @@ await test(
     assert.equal(
       command.state.peerRooms.has(
         'peer-b',
+      ),
+      false,
+    );
+
+    assert.equal(
+      command.state.roomWatch.has(
+        'room-ab',
       ),
       false,
     );

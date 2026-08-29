@@ -7,6 +7,7 @@ const DEFAULTS = Object.freeze({
   rtcPort: 5000,
 
   roomTtlMs: 15_000,
+  shutdownCleanupTimeoutMs: 10_000,
   maxPayloadBytes: 64 * 1024,
 
   redisUrl: 'redis://127.0.0.1:6379',
@@ -258,6 +259,17 @@ export function loadConfig(
         max: 5 * 60_000,
       },
     ),
+
+    shutdownCleanupTimeoutMs:
+      readInteger(
+        env,
+        'SHUTDOWN_CLEANUP_TIMEOUT_MS',
+        DEFAULTS.shutdownCleanupTimeoutMs,
+        {
+          min: 1_000,
+          max: 60_000,
+        },
+      ),
 
     maxPayloadBytes:
       readInteger(

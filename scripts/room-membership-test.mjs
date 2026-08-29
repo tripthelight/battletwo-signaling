@@ -6,6 +6,7 @@ import {
   makeRoomCleanupKey,
   makeRoomCleanupRoomKey,
   makeRoomKey,
+  makeRoomWatchKey,
 } from '../src/server/roomMembership.js';
 
 let passed = 0;
@@ -36,6 +37,7 @@ function createFakeCommand({
   rooms = {},
   cleanupRoomByPeer = {},
   cleanupDueByPeer = {},
+  roomWatchByRoom = {},
 } = {}) {
   return {
     async get(key) {
@@ -320,17 +322,22 @@ function createFakeCommand({
       ) {
         assert.equal(
           numberOfKeys,
-          2,
+          3,
+        );
+
+        assert.equal(
+          arguments[4],
+          `${arguments[5]}:room-watch`,
         );
 
         const nowMs =
           Number(
-            arguments[5],
+            arguments[6],
           );
 
         const limit =
           Number(
-            arguments[6],
+            arguments[7],
           );
 
         const candidates =
@@ -474,6 +481,10 @@ function createFakeCommand({
 
           delete cleanupRoomByPeer[
             partnerPeerId
+          ];
+
+          delete roomWatchByRoom[
+            scheduledRoomId
           ];
 
           cleaned.push(
@@ -790,6 +801,13 @@ await test(
         'bt:test',
       ),
       'bt:test:room-cleanup-room',
+    );
+
+    assert.equal(
+      makeRoomWatchKey(
+        'bt:test',
+      ),
+      'bt:test:room-watch',
     );
   },
 );

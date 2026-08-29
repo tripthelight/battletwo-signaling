@@ -55,6 +55,98 @@ services:
     restart: unless-stopped
     stop_grace_period: 15s
 
+  turn-credentials-a:
+    image: battletwo-turn-credentials:260829-1
+    container_name: battletwo-turn-credentials-prod-a
+    command:
+      - node
+      - src/server/turnCredentialServer.js
+    environment:
+      TURN_CREDENTIAL_HOST: 0.0.0.0
+      TURN_CREDENTIAL_PORT: "5001"
+      TURN_CREDENTIAL_TTL_SECONDS: "900"
+      TURN_URLS: turn:220.71.2.126:3478?transport=udp
+      TURN_SHARED_SECRET_FILE: /run/secrets/turn_shared_secret
+      TURN_CREDENTIAL_ALLOWED_ORIGIN: "*"
+    secrets:
+      - turn_shared_secret
+    networks:
+      - signaling-prod
+    restart: unless-stopped
+    stop_grace_period: 15s
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - >-
+          const http=require('http');
+          const req=http.get(
+            'http://127.0.0.1:5001/healthz',
+            (res)=>{
+              res.resume();
+              process.exit(res.statusCode===200?0:1);
+            }
+          );
+          req.on('error',()=>process.exit(1));
+          req.setTimeout(
+            2000,
+            ()=>{
+              req.destroy();
+              process.exit(1);
+            }
+          );
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+
+  turn-credentials-b:
+    image: battletwo-turn-credentials:260829-1
+    container_name: battletwo-turn-credentials-prod-b
+    command:
+      - node
+      - src/server/turnCredentialServer.js
+    environment:
+      TURN_CREDENTIAL_HOST: 0.0.0.0
+      TURN_CREDENTIAL_PORT: "5001"
+      TURN_CREDENTIAL_TTL_SECONDS: "900"
+      TURN_URLS: turn:220.71.2.126:3478?transport=udp
+      TURN_SHARED_SECRET_FILE: /run/secrets/turn_shared_secret
+      TURN_CREDENTIAL_ALLOWED_ORIGIN: "*"
+    secrets:
+      - turn_shared_secret
+    networks:
+      - signaling-prod
+    restart: unless-stopped
+    stop_grace_period: 15s
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - >-
+          const http=require('http');
+          const req=http.get(
+            'http://127.0.0.1:5001/healthz',
+            (res)=>{
+              res.resume();
+              process.exit(res.statusCode===200?0:1);
+            }
+          );
+          req.on('error',()=>process.exit(1));
+          req.setTimeout(
+            2000,
+            ()=>{
+              req.destroy();
+              process.exit(1);
+            }
+          );
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+
   lb:
     image: nginx:alpine
     container_name: battletwo-signaling-prod-lb
@@ -66,6 +158,10 @@ services:
       signaling-a:
         condition: service_healthy
       signaling-b:
+        condition: service_healthy
+      turn-credentials-a:
+        condition: service_healthy
+      turn-credentials-b:
         condition: service_healthy
     networks:
       - signaling-prod
@@ -87,3 +183,7 @@ networks:
 volumes:
   redis-data:
     name: battletwo-signaling-prod-redis-data
+
+secrets:
+  turn_shared_secret:
+    file: /etc/battletwo/turn_shared_secret

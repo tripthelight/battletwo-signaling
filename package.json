@@ -18,7 +18,8 @@
     "test:resume-token": "node scripts/resume-token-test.mjs",
     "test:resume-session": "node scripts/resume-session-test.mjs",
     "test:resume-session-redis": "node scripts/resume-session-redis-test.mjs",
-    "test:resume-claim-manager": "node scripts/resume-claim-manager-test.mjs"
+    "test:resume-claim-manager": "node scripts/resume-claim-manager-test.mjs",
+    "test:storage-bootstrap-redis": "node scripts/storage-bootstrap-redis-test.mjs"
   },
   "dependencies": {
     "crc-32": "^1.2.2",

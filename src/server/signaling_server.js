@@ -2623,84 +2623,197 @@ function cbConnection(ws, req) {
         msg?.type ===
           'requestStorage' &&
         msg?.gameName &&
-        msg?.initRole
+        (
+          msg?.initRole ===
+            'impolite' ||
+          msg?.initRole ===
+            'polite'
+        )
       ) {
-        const room =
-          ROOMS[
-            meta.roomId
-          ];
+        const storageRoomId =
+          meta.roomId;
 
-        if (!room) {
+        if (!storageRoomId) {
+          console.warn(
+            `[storage] peer ${meta.peerId} has no assigned room`,
+          );
+
           return;
         }
 
-        const localPeer =
-          room.clients.get(
-            meta.peerId,
-          );
+        /*
+         * Legacy prototype rooms are still kept temporarily so
+         * old room-hint/reload behavior does not regress.
+         *
+         * Fresh production matchmaking stores room membership
+         * in Redis and does not populate ROOMS.
+         */
+        const legacyRoom =
+          ROOMS[
+            storageRoomId
+          ];
 
-        if (localPeer) {
-          const transformedKeypair =
-            transformRoomId(
-              room.keypair,
+        let responseSocket =
+          ws;
+
+        let roomKeypair;
+
+        if (legacyRoom) {
+          const legacyPeer =
+            legacyRoom.clients.get(
+              meta.peerId,
             );
 
-          const keypair = {
-            public:
-              randomPublicKey(
+          if (!legacyPeer) {
+            console.warn(
+              `[storage] legacy room ${storageRoomId} does not contain peer ${meta.peerId}`,
+            );
+
+            return;
+          }
+
+          responseSocket =
+            legacyPeer;
+
+          roomKeypair =
+            legacyRoom.keypair;
+        } else {
+          let durableRoomId;
+
+          try {
+            durableRoomId =
+              await roomMembership.findRoom(
+                meta.peerId,
+              );
+          } catch (error) {
+            console.error(
+              `[storage] failed to resolve Redis room for peer ${meta.peerId}:`,
+              error,
+            );
+
+            return;
+          }
+
+          if (
+            !durableRoomId ||
+            durableRoomId !==
+              storageRoomId
+          ) {
+            console.warn(
+              `[storage] room membership mismatch for peer ${meta.peerId}`,
+            );
+
+            return;
+          }
+
+          /*
+           * Keep bootstrap key generation deterministic.
+           * Either signaling instance must be able to create the
+           * same keys from the shared Redis room id.
+           */
+          roomKeypair =
+            keypairCode(
+              durableRoomId,
+            );
+        }
+
+        const transformedKeypair =
+          transformRoomId(
+            roomKeypair,
+          );
+
+        const keypair = {
+          public:
+            randomPublicKey(
+              transformedKeypair,
+            ),
+
+          private: {
+            impolite:
+              randomPrivateKeyImpolite(
                 transformedKeypair,
+              ).slice(
+                -10,
               ),
 
-            private: {
-              impolite:
-                randomPrivateKeyImpolite(
-                  transformedKeypair,
-                ).slice(
-                  -10,
-                ),
+            polite:
+              randomPrivateKeyPolite(
+                transformedKeypair,
+              ).slice(
+                -10,
+              ),
+          },
+        };
 
-              polite:
-                randomPrivateKeyPolite(
-                  transformedKeypair,
-                ).slice(
-                  -10,
-                ),
-            },
-          };
+        let STORAGE_DATA;
 
-          const STORAGE_DATA =
+        try {
+          STORAGE_DATA =
             await MAKE_STORAGE.findGame(
               msg.gameName,
               keypair,
               msg.initRole,
             );
+        } catch (error) {
+          console.error(
+            `[storage] failed to create bootstrap data for ${msg.gameName}:`,
+            error,
+          );
+
+          return;
+        }
+
+        if (
+          !STORAGE_DATA ||
+          typeof STORAGE_DATA !==
+            'object' ||
+          !STORAGE_DATA.storageData ||
+          typeof STORAGE_DATA.storageData !==
+            'object'
+        ) {
+          console.warn(
+            `[storage] no bootstrap data is registered for game ${msg.gameName}`,
+          );
 
           safeSend(
-            localPeer,
+            responseSocket,
             {
               type:
-                'responseStorage',
+                'storage-unavailable',
 
-              storageData:
-                STORAGE_DATA,
-
-              keypair: {
-                puk:
-                  keypair.public,
-
-                prk:
-                  msg.initRole ===
-                  'impolite'
-                    ? keypair
-                        .private
-                        .impolite
-                    : keypair
-                        .private
-                        .polite,
-              },
+              gameName:
+                msg.gameName,
             },
           );
+
+          return;
         }
+
+        safeSend(
+          responseSocket,
+          {
+            type:
+              'responseStorage',
+
+            storageData:
+              STORAGE_DATA,
+
+            keypair: {
+              puk:
+                keypair.public,
+
+              prk:
+                msg.initRole ===
+                'impolite'
+                  ? keypair
+                      .private
+                      .impolite
+                  : keypair
+                      .private
+                      .polite,
+            },
+          },
+        );
       }
     },
   );

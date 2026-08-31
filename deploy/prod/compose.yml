@@ -65,7 +65,7 @@ services:
       TURN_CREDENTIAL_HOST: 0.0.0.0
       TURN_CREDENTIAL_PORT: "5001"
       TURN_CREDENTIAL_TTL_SECONDS: "900"
-      TURN_URLS: turn:220.71.2.126:3478?transport=udp
+      TURN_URLS: turn:220.71.2.152:3478?transport=udp
       TURN_SHARED_SECRET_FILE: /run/secrets/turn_shared_secret
       TURN_CREDENTIAL_ALLOWED_ORIGIN: "*"
     secrets:
@@ -111,7 +111,7 @@ services:
       TURN_CREDENTIAL_HOST: 0.0.0.0
       TURN_CREDENTIAL_PORT: "5001"
       TURN_CREDENTIAL_TTL_SECONDS: "900"
-      TURN_URLS: turn:220.71.2.126:3478?transport=udp
+      TURN_URLS: turn:220.71.2.152:3478?transport=udp
       TURN_SHARED_SECRET_FILE: /run/secrets/turn_shared_secret
       TURN_CREDENTIAL_ALLOWED_ORIGIN: "*"
     secrets:

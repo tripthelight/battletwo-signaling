@@ -24,7 +24,7 @@ services:
       start_period: 5s
 
   signaling-a:
-    image: battletwo-signaling:b62a53e
+    image: battletwo-signaling:910e42c
     container_name: battletwo-signaling-prod-a
     environment:
       REDIS_URL: redis://redis:6379
@@ -40,7 +40,7 @@ services:
     stop_grace_period: 15s
 
   signaling-b:
-    image: battletwo-signaling:b62a53e
+    image: battletwo-signaling:910e42c
     container_name: battletwo-signaling-prod-b
     environment:
       REDIS_URL: redis://redis:6379

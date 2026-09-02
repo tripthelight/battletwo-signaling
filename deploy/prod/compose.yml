@@ -56,7 +56,7 @@ services:
     stop_grace_period: 15s
 
   turn-credentials-a:
-    image: battletwo-turn-credentials:260829-1
+    image: battletwo-turn-credentials:66e8f38
     container_name: battletwo-turn-credentials-prod-a
     command:
       - node
@@ -102,7 +102,7 @@ services:
       start_period: 5s
 
   turn-credentials-b:
-    image: battletwo-turn-credentials:260829-1
+    image: battletwo-turn-credentials:66e8f38
     container_name: battletwo-turn-credentials-prod-b
     command:
       - node

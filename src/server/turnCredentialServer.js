@@ -17,10 +17,6 @@ const DEFAULTS = Object.freeze({
 
   credentialTtlSeconds: 900,
 
-  turnUrls: [
-    'turn:220.71.2.126:3478?transport=udp',
-  ],
-
   sharedSecretFile:
     '/run/secrets/turn_shared_secret',
 
@@ -102,9 +98,15 @@ function readTurnUrls(
     readString(
       env,
       'TURN_URLS',
-      DEFAULTS.turnUrls.join(','),
+      null,
       4_096,
     );
+
+  if (raw === null) {
+    throw new Error(
+      '[turn-credentials] TURN_URLS is required',
+    );
+  }
 
   const urls =
     raw

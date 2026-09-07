@@ -193,6 +193,16 @@ const CONNECTION_CLEANUP_RETRY_MS =
 const activePeerIds =
   new Set();
 
+/*
+ * WebSocket connection generation -> gameName
+ *
+ * matchmaking scope는 room이나 peer identity가 아니라 현재 접속한
+ * game document에 귀속된다. WeakMap을 사용해 socket 종료 후 별도
+ * cleanup 없이 GC될 수 있게 한다.
+ */
+const connectionGameNames =
+  new WeakMap();
+
 const connectionCleanupTasks =
   new Set();
 
@@ -1023,6 +1033,7 @@ function rejectResume(
 async function handleResumeJoin(
   ws,
   resumeToken,
+  gameName,
 ) {
   let result;
 
@@ -1154,6 +1165,8 @@ async function handleResumeJoin(
       pairedDataChannel:
         null,
 
+      gameName,
+
       resumeToken:
         result.token,
     },
@@ -1167,6 +1180,8 @@ async function handleResumeJoin(
 
       roomId:
         result.roomId,
+
+      gameName,
 
       you: {
         peerId:
@@ -1300,6 +1315,46 @@ function isNonEmptyInternalId(
   );
 }
 
+function normalizeGameName(
+  value,
+) {
+  if (
+    typeof value !== 'string' ||
+    !/^[A-Za-z0-9_-]{1,64}$/.test(
+      value,
+    )
+  ) {
+    return null;
+  }
+
+  return value;
+}
+
+function rejectJoin(
+  ws,
+  reason,
+) {
+  safeSend(
+    ws,
+    {
+      type:
+        'join-rejected',
+
+      reason,
+    },
+  );
+
+  if (
+    ws.readyState ===
+    ws.OPEN
+  ) {
+    ws.close(
+      1008,
+      'join rejected',
+    );
+  }
+}
+
 async function applyInternalPairAssignment(
   ws,
   payload,
@@ -1319,7 +1374,13 @@ async function applyInternalPairAssignment(
   const {
     roomId,
     partnerPeerId,
+    gameName,
   } = payload ?? {};
+
+  const localGameName =
+    connectionGameNames.get(
+      ws,
+    ) ?? null;
 
   if (
     !isNonEmptyInternalId(
@@ -1329,7 +1390,12 @@ async function applyInternalPairAssignment(
       partnerPeerId,
     ) ||
     partnerPeerId ===
-      metaBefore.peerId
+      metaBefore.peerId ||
+    normalizeGameName(
+      gameName,
+    ) === null ||
+    localGameName !==
+      gameName
   ) {
     return;
   }
@@ -1409,6 +1475,8 @@ async function applyInternalPairAssignment(
       pairedDataChannel:
         null,
 
+      gameName,
+
       resumeToken,
     },
   );
@@ -1428,6 +1496,8 @@ async function applyInternalPairAssignment(
         role:
           'impolite',
       },
+
+      gameName,
 
       partner: {
         peerId:
@@ -1468,12 +1538,15 @@ function safeSend(ws, obj) {
   }
 }
 
-function findWaitingRoom() {
+function findWaitingRoom(
+  gameName,
+) {
   for (const id in ROOMS) {
     const room = ROOMS[id];
 
     if (
       room &&
+      room.gameName === gameName &&
       !room.lockAfterLeave &&
       room.clients.size === 1
     ) {
@@ -1484,11 +1557,14 @@ function findWaitingRoom() {
   return null;
 }
 
-function createRoom() {
+function createRoom(
+  gameName,
+) {
   const id = makeRoomId();
 
   ROOMS[id] = {
     id,
+    gameName,
     clients: new Map(),
     keypair: keypairCode(id),
   };
@@ -1496,9 +1572,13 @@ function createRoom() {
   return ROOMS[id];
 }
 
-function createRoomWithId(roomId) {
+function createRoomWithId(
+  roomId,
+  gameName,
+) {
   ROOMS[roomId] = {
     id: roomId,
+    gameName,
     clients: new Map(),
     keypair: keypairCode(roomId),
     paired: true,
@@ -1645,6 +1725,7 @@ async function handleJoin(
   ws,
   meta,
   msg,
+  gameName,
 ) {
   const requested =
     typeof msg.roomHint ===
@@ -1675,6 +1756,10 @@ async function handleJoin(
     ROOMS[params.requested] &&
     ROOMS[
       params.requested
+    ].gameName ===
+      gameName &&
+    ROOMS[
+      params.requested
     ].clients.size < 2
   ) {
     params.room =
@@ -1702,6 +1787,7 @@ async function handleJoin(
     params.room =
       createRoomWithId(
         params.requested,
+        gameName,
       );
 
     params.pairedDataChannel =
@@ -1717,12 +1803,14 @@ async function handleJoin(
   await handleFreshJoin(
     ws,
     meta,
+    gameName,
   );
 }
 
 async function handleFreshJoin(
   ws,
   meta,
+  gameName,
 ) {
   const MAX_MATCH_ATTEMPTS =
     3;
@@ -1743,6 +1831,9 @@ async function handleFreshJoin(
 
           proposedRoomId:
             randomUUID(),
+
+          matchScope:
+            gameName,
         });
     } catch (error) {
       console.error(
@@ -1791,6 +1882,9 @@ async function handleFreshJoin(
 
             partnerPeerId:
               result.partnerPeerId,
+
+            matchScope:
+              gameName,
           });
         } catch (error) {
           console.error(
@@ -1874,6 +1968,8 @@ async function handleFreshJoin(
 
             partnerPeerId:
               meta.peerId,
+
+            gameName,
           },
         });
     } catch (error) {
@@ -1901,6 +1997,9 @@ async function handleFreshJoin(
 
           partnerPeerId:
             result.partnerPeerId,
+
+          matchScope:
+            gameName,
         });
       } catch (error) {
         console.error(
@@ -1981,6 +2080,8 @@ async function handleFreshJoin(
         pairedDataChannel:
           null,
 
+        gameName,
+
         resumeToken,
       },
     );
@@ -1993,6 +2094,8 @@ async function handleFreshJoin(
 
         roomId:
           result.roomId,
+
+        gameName,
 
         you: {
           peerId:
@@ -2029,15 +2132,34 @@ async function handleFreshJoin(
 async function cancelPeerWaiting(
   peerId,
 ) {
-  try {
-    await matchmaker.cancelWaiting(
+  const connection =
+    localPeers.getSocket(
       peerId,
+    );
+
+  const gameName =
+    connection
+      ? connectionGameNames.get(
+          connection,
+        ) ?? null
+      : null;
+
+  if (!gameName) {
+    return false;
+  }
+
+  try {
+    return await matchmaker.cancelWaiting(
+      peerId,
+      gameName,
     );
   } catch (error) {
     console.error(
       `[matchmaking] failed to cancel waiting peer ${peerId}:`,
       error,
     );
+
+    return false;
   }
 }
 
@@ -2447,6 +2569,25 @@ function cbConnection(ws, req) {
   async function runJoin(
     msg,
   ) {
+    const gameName =
+      normalizeGameName(
+        msg?.gameName,
+      );
+
+    if (!gameName) {
+      rejectJoin(
+        ws,
+        'invalid-game',
+      );
+
+      return;
+    }
+
+    connectionGameNames.set(
+      ws,
+      gameName,
+    );
+
     const hasResumeToken =
       Object.prototype
         .hasOwnProperty.call(
@@ -2458,6 +2599,7 @@ function cbConnection(ws, req) {
       await handleResumeJoin(
         ws,
         msg.resumeToken,
+        gameName,
       );
 
       return;
@@ -2480,6 +2622,7 @@ function cbConnection(ws, req) {
         ws,
         meta,
         msg,
+        gameName,
       );
     } catch (error) {
       console.error(
@@ -2623,6 +2766,10 @@ function cbConnection(ws, req) {
         msg?.type ===
           'requestStorage' &&
         msg?.gameName &&
+        msg.gameName ===
+          connectionGameNames.get(
+            ws,
+          ) &&
         (
           msg?.initRole ===
             'impolite' ||

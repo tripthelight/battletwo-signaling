@@ -52,6 +52,21 @@ function assertRoomId(
   }
 }
 
+function assertMatchScope(
+  matchScope,
+) {
+  if (
+    typeof matchScope !== 'string' ||
+    !/^[A-Za-z0-9_-]{1,64}$/.test(
+      matchScope,
+    )
+  ) {
+    throw new TypeError(
+      'matchScope must be a safe non-empty string',
+    );
+  }
+}
+
 function assertNowMs(
   nowMs,
 ) {
@@ -67,13 +82,24 @@ function assertNowMs(
 
 export function makeWaitingKey(
   keyPrefix,
+  matchScope = null,
 ) {
   assertKeyPrefix(
     keyPrefix,
   );
 
+  if (matchScope === null) {
+    return (
+      `${keyPrefix}:waiting`
+    );
+  }
+
+  assertMatchScope(
+    matchScope,
+  );
+
   return (
-    `${keyPrefix}:waiting`
+    `${keyPrefix}:waiting:${matchScope}`
   );
 }
 
@@ -195,11 +221,6 @@ export function createMatchmaker({
     keyPrefix,
   );
 
-  const waitingKey =
-    makeWaitingKey(
-      keyPrefix,
-    );
-
   const roomWatchKey =
     makeRoomWatchKey(
       keyPrefix,
@@ -208,6 +229,7 @@ export function createMatchmaker({
   async function match({
     peerId,
     proposedRoomId,
+    matchScope = null,
     nowMs = Date.now(),
   }) {
     assertPeerId(
@@ -217,6 +239,12 @@ export function createMatchmaker({
     assertRoomId(
       proposedRoomId,
     );
+
+    const waitingKey =
+      makeWaitingKey(
+        keyPrefix,
+        matchScope,
+      );
 
     assertNowMs(
       nowMs,
@@ -487,6 +515,7 @@ export function createMatchmaker({
     roomId,
     peerId,
     partnerPeerId,
+    matchScope = null,
   }) {
     assertRoomId(
       roomId,
@@ -507,6 +536,12 @@ export function createMatchmaker({
         'paired peer ids must be different',
       );
     }
+
+    const waitingKey =
+      makeWaitingKey(
+        keyPrefix,
+        matchScope,
+      );
 
     const roomKey =
       makeRoomKey(
@@ -623,10 +658,17 @@ export function createMatchmaker({
 
   async function cancelWaiting(
     peerId,
+    matchScope = null,
   ) {
     assertPeerId(
       peerId,
     );
+
+    const waitingKey =
+      makeWaitingKey(
+        keyPrefix,
+        matchScope,
+      );
 
     const removed =
       await command.zrem(

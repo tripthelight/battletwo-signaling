@@ -600,6 +600,28 @@ export const obfuscationList = {
       */
     };
   },
+  blackAndWhite2: () => {
+    return {
+      /*
+      GAME_NAME: {
+        k: 'UOYKERICDL', // [85, 79, 89, 75, 69, 82, 73, 67, 68, 76]
+        v: 'LSQIDKMPYB', // blackAndWhite2 -> [76, 83, 81, 73, 68, 75, 77, 80, 89, 66]
+      },
+      GAME_STATE: {
+        k: 'HVIDSRXYEC', // [72, 86, 73, 68, 83, 82, 88, 89, 69, 67]
+        v: {
+          waitEnemy: 'QNJPVSIRKH', // [81, 78, 74, 80, 86, 83, 73, 82, 75, 72]
+          ready: 'ZIUSQJBAPX', // [90, 73, 85, 83, 81, 74, 66, 65, 80, 88]
+          playing: 'QVZYFBSKTM', // [81, 86, 90, 89, 70, 66, 83, 75, 84, 77]
+          gameOver: 'PSXAOKVLWI', // [80, 83, 88, 65, 79, 75, 86, 76, 87, 73]
+        },
+      },
+      GAME_STATE_ALL_KEYS: {
+        k: 'IEPHLNOTBG', // [73, 69, 80, 72, 76, 78, 79, 84, 66, 71]
+      },
+      */
+    };
+  },
 };
 
 /**

@@ -1,5 +1,6 @@
 import makeAesSecretKey from './makeAesSecretKey.js';
 import obfuscatedStr from './obfuscatedStr.js';
+import { numL, numR } from './obfuscatedNum.js';
 
 export const obfuscationList = {
   indianPocker: () => {
@@ -620,6 +621,14 @@ export const obfuscationList = {
         k: 'IEPHLNOTBG', // [73, 69, 80, 72, 76, 78, 79, 84, 66, 71]
       },
       */
+      POINT_NUMS_L: { // 사용한 Point 두자리 숫자 중 왼쪽 10의 자리 숫자
+        k: 'PMWCAUYIOQ', // [80, 77, 87, 67, 65, 85, 89, 73, 79, 81]
+        v: numL,
+      },
+      POINT_NUMS_R: { // 사용한 Point 두자리 숫자 중 오른쪽 1의 자리 숫자
+        k: 'WIPYNDLAZO', // [87, 73, 80, 89, 78, 68, 76, 65, 90, 79]
+        v: numR,
+      },
     };
   },
   memoryMaze: () => {
